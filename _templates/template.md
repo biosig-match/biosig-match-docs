@@ -1,5 +1,4 @@
-$templateContent = @"
----
+﻿---
 service_name: ""
 description: ""
 inputs:
@@ -19,6 +18,3 @@ outputs:
 ## 詳細
 
 (ここに処理の詳細や仕様を記述)
-"@
-
-Set-Content -Path "_templates/template.md" -Value $templateContent
