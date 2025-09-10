@@ -2,40 +2,59 @@ import re
 import yaml
 from pathlib import Path
 import unicodedata
-import os
+
+# --- 追加: 名称の揺れを吸収するためのマッピング ---
+# ここに別名や古い名称を定義しておくと、スクリプトが自動で正しいIDに変換する
+NAME_TO_ID_MAP = {
+    "（データ紐付けワーカー）": "DataLinkageWorker",
+    "非同期タスクキュー (例: Celery)": "DataLinkageWorker",
+    "Firmware (ESP32)": "Firmware_BLE",
+    "ファームウェア (BLE)": "Firmware_BLE",
+    "スマートフォンアプリ": "SmartphoneApp",
+    "Collectorサービス": "CollectorService",
+    "Processorサービス": "ProcessorService",
+    "Realtime Analyzerサービス": "RealtimeAnalyzerService",
+    "Session Managerサービス": "SessionManagerService",
+    "BIDS Exporterサービス": "BIDSExporterService",
+    "MinIO (オブジェクトストレージ)": "MinIO",
+    "PostgreSQL": "PostgreSQL",
+    "ユーザー": "User",
+    "ユーザー (via API Call)": "User",
+    "RabbitMQ (Fanout Exchange: raw_data_exchange)": "RawDataExchange",
+    "RabbitMQ (processing_queue)": "ProcessingQueue",
+    "RabbitMQ (analysis_queue)": "AnalysisQueue",
+}
+
 
 def to_mermaid_id(text, components_meta):
     """
     文字列をMermaid.jsの有効なノードIDに変換します。
-    - 日本語の表示名などから、定義済みのコンポーネントIDへのマッピングを試みます。
-    - マッピングが見つからない場合は、一般的なサニタイズ処理を適用します。
     """
     if not isinstance(text, str):
-        return "" # textがNoneなどの場合にエラーを防ぐ
+        return ""
 
+    original_text = text
     normalized_text = unicodedata.normalize('NFKC', text).strip()
 
-    # --- 変更点 1: 表示名から定義済みIDへの逆引きを試みる ---
-    # これにより、YAMLに書かれた日本語名がCOMPONENTS_METAの英語IDに正しく変換される
+    # 1. 完全に一致する別名マッピングを試す
+    if normalized_text in NAME_TO_ID_MAP:
+        return NAME_TO_ID_MAP[normalized_text]
+
+    # 2. 表示名(label)からIDへの逆引きを試す
     for component_id, meta in components_meta.items():
-        # metaのlabelからHTMLタグ(<br>)を除外して比較
         label_without_br = meta.get("label", "").replace("<br>", " ")
         if normalized_text == label_without_br or normalized_text == component_id:
             return component_id
+            
+    # 3. かっこ（）とその中身を削除したもので再度マッピングを試す
+    text_without_parens = re.sub(r'[\(（].*?[\)）]', '', normalized_text).strip()
+    if text_without_parens in NAME_TO_ID_MAP:
+        return NAME_TO_ID_MAP[text_without_parens]
 
-    # --- 変更点 2: 正規表現ベースの変換を改善 ---
-    # 汎用的なクリーンアップ処理に絞り、予測可能性を高める
-    
-    # かっこ（）とその中身を削除
-    text = re.sub(r'[\(（].*?[\)）]', '', normalized_text)
-    
-    # 一般的な区切り文字をアンダースコアに置換
-    text = re.sub(r'[\s/,-]+', '_', text)
-    
-    # 有効なID文字（英数字とアンダースコア）以外を削除
-    text = re.sub(r'[^\w_]', '', text)
-    
-    return text.strip('_')
+    # --- 警告の出力: どの名前で失敗したかを表示 ---
+    print(f"Warning: Could not find a matching ID for '{original_text}'. It will be skipped.")
+    return ""
+
 
 def parse_markdown_frontmatter(file_path):
     """
@@ -48,7 +67,8 @@ def parse_markdown_frontmatter(file_path):
         return None
     
     match = re.search(r'^---\s*\n(.*?)\n---', content, re.DOTALL)
-    if not match: return None
+    if not match:
+        return None
         
     try:
         return yaml.safe_load(match.group(1))
@@ -60,8 +80,6 @@ def main():
     root_dir = Path(__file__).parent.parent
     output_file = root_dir / "architecture" / "02_data-flow.md"
     
-    # --- 1. Define the graphical structure (subgraphs, icons, etc.) ---
-    # IDはMermaidで有効な一意の識別子とする
     COMPONENTS_META = {
         'User': {"label": "User", "icon": "fa:fa-user"},
         'Firmware_BLE': {"label": "Firmware (BLE)", "icon": "fa:fa-microchip"},
@@ -88,12 +106,8 @@ def main():
         "Management & Export": ['SessionManagerService', 'BIDSExporterService', 'DataLinkageWorker']
     }
 
-    # --- 2. Discover connections from .md files ---
     connections = set()
     discovered_ids = set()
-
-    # --- 変更点 3: to_mermaid_idに関数を渡せるようにする ---
-    id_converter = lambda text: to_mermaid_id(text, COMPONENTS_META)
 
     for md_file in root_dir.rglob("*.md"):
         if any(part in str(md_file) for part in ["README", "_templates", "architecture"]):
@@ -103,46 +117,45 @@ def main():
         if not data or 'service_name' not in data:
             continue
 
-        service_id = id_converter(data['service_name'])
+        service_id = to_mermaid_id(data['service_name'], COMPONENTS_META)
         if service_id:
             discovered_ids.add(service_id)
 
         for item in data.get('inputs', []):
             source_name = item.get('source')
-            source_id = id_converter(source_name)
-            # --- 変更点 4: IDが空でないことを確認 ---
+            source_id = to_mermaid_id(source_name, COMPONENTS_META)
             if source_id and service_id:
                 discovered_ids.add(source_id)
                 connections.add(f"    {source_id} --> {service_id}")
 
         for item in data.get('outputs', []):
             target_name = item.get('target')
-            target_id = id_converter(target_name)
+            target_id = to_mermaid_id(target_name, COMPONENTS_META)
             if service_id and target_id:
                 discovered_ids.add(target_id)
                 connections.add(f"    {service_id} --> {target_id}")
     
-    # --- 3. Generate Mermaid markdown ---
     mermaid_lines = ["graph LR\n"]
 
-    # Define nodes within their subgraphs
     for subgraph_name, members in SUBGRAPH_STRUCTURE.items():
+        # サブグラフに表示すべきメンバーが存在する場合のみサブグラフブロックを生成
+        drawable_members = [m for m in members if m in discovered_ids]
+        if not drawable_members:
+            continue
+
         mermaid_lines.append(f'    subgraph "{subgraph_name}"')
         if subgraph_name in ["API & Data Ingestion", "Backend Processing", "Storage Layer", "Management & Export"]:
              mermaid_lines.append("        direction TB")
-        for member_id in members:
-            # --- 変更点 5: discovered_ids（実際に登場したノード）のみを描画 ---
-            if member_id in discovered_ids and member_id in COMPONENTS_META:
+        for member_id in drawable_members:
+            if member_id in COMPONENTS_META:
                 meta = COMPONENTS_META[member_id]
                 mermaid_lines.append(f'        {member_id}["{meta["icon"]} {meta["label"]}"]')
         mermaid_lines.append("    end\n")
 
-    # Add connections
     if connections:
         mermaid_lines.append("    %% --- Connections ---")
         mermaid_lines.extend(sorted(list(connections)))
     
-    # Add styling
     mermaid_lines.append("\n    %% --- Styling ---")
     mermaid_lines.append("    style \"External Actors\" fill:#e3f2fd,stroke:#333")
     mermaid_lines.append("    style \"Mobile Client\" fill:#e8f5e9,stroke:#333")
@@ -151,8 +164,6 @@ def main():
     mermaid_lines.append("    classDef queue fill:#fff3cd,stroke:#856404")
     mermaid_lines.append("    class RawDataExchange,ProcessingQueue,AnalysisQueue queue")
     
-    # --- 4. Write the final markdown file ---
-    output_file.parent.mkdir(parents=True, exist_ok=True)
     output_text = f"""# Data Flow Diagram
 (This file is auto-generated by a script. Do not edit manually.)
 
@@ -160,6 +171,7 @@ def main():
 {"\n".join(mermaid_lines)}
 ```
 """
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(output_text)
 

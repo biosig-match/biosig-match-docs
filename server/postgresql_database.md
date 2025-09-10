@@ -2,14 +2,17 @@
 service_name: "PostgreSQL Database"
 description: "全てのメタデータを管理する、信頼性の高いリレーショナルデータベース。"
 inputs:
-  - source: "Session Managerサービス"
-    data_format: "SQL INSERT/UPDATE"
-    schema: "実験、セッション情報"
-  - source: "（データ紐付けワーカー）"
+  - source: "Async Task Queue (DataLinker)"
     data_format: "SQL UPDATE"
     schema: "セッションとオブジェクトIDの関連付け"
+  - source: "Session Manager Service"
+    data_format: "SQL INSERT/UPDATE"
+    schema: "実験、セッション情報"
 outputs:
-  - target: "BIDS Exporterサービス, Session Managerサービス"
+  - target: "BIDS Exporter Service"
+    data_format: "SQL SELECT"
+    schema: "各種メタデータの読み出し"
+  - target: "Session Manager Service"
     data_format: "SQL SELECT"
     schema: "各種メタデータの読み出し"
 ---

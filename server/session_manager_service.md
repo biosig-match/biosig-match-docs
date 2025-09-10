@@ -2,14 +2,14 @@
 service_name: "Session Manager Service"
 description: "実験とセッションのメタデータを管理し、ライフサイクルを司るサービス。"
 inputs:
-  - source: "スマートフォンアプリ"
+  - source: "Smartphone App"
     data_format: "HTTP POST/GET (JSON)"
     schema: "実験作成リクエスト、セッション終了通知など"
 outputs:
   - target: "PostgreSQL"
     data_format: "SQL INSERT/UPDATE"
     schema: "`experiments`テーブル, `sessions`テーブルへの書き込み"
-  - target: "非同期タスクキュー (例: Celery)"
+  - target: "Async Task Queue (DataLinker)"
     data_format: "Job"
     schema: "データ紐付け処理のタスク"
 ---
