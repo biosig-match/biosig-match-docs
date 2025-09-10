@@ -1,84 +1,143 @@
-# scripts/generate_flow.py
+import re
 import yaml
 from pathlib import Path
-import re
+import unicodedata
 import os
 
-def sanitize_id(text):
-    """MermaidのノードIDとして使えるように文字列をサニタイズする"""
-    # 記号やスペースをアンダースコアに置換
-    s = re.sub(r'[\s:/\\-]', '_', text)
-    # かっこや不要な文字を削除
-    s = re.sub(r'[\[\]{}()"\'`]', '', s)
-    return s
+def to_mermaid_id(text):
+    """
+    文字列をMermaid.jsの有効なノードIDに変換します。
+    - 日本語文字を正規化します。
+    - 問題のある文字をアンダースコアに置換します。
+    - 残りの英数字以外の文字を削除します。
+    """
+    # 全角文字を半角に正規化
+    text = unicodedata.normalize('NFKC', text)
+    # 括弧とその中身を削除
+    text = re.sub(r'\(.*?\)', '', text)
+    # 一般的な用語の基本的な翻字
+    text = text.replace('スマートフォンアプリ', 'SmartphoneApp')
+    text = text.replace('サービス', 'Service')
+    text = text.replace('（データ紐付けワーカー）', 'DataLinkageWorker')
+    # スペースや一般的な区切り文字をアンダースコアに置換
+    text = re.sub(r'[\s/,-]+', '_', text)
+    # 英数字またはアンダースコア以外の文字を削除
+    text = re.sub(r'[^\w]', '', text)
+    return text.strip('_')
+
+def parse_markdown_frontmatter(file_path):
+    """
+    マークダウンファイルからYAMLフロントマターを解析します。
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except IOError:
+        return None
+    
+    # YAMLフロントマターを抽出
+    match = re.search(r'^---\s*\n(.*?)\n---', content, re.DOTALL)
+    if not match:
+        return None
+        
+    try:
+        data = yaml.safe_load(match.group(1))
+        return data
+    except yaml.YAMLError as e:
+        print(f"Error parsing YAML in {file_path}: {e}")
+        return None
 
 def main():
-    # リポジトリのルートディレクトリを取得
+    """
+    Mermaid図を生成するメイン関数。
+    """
     root_dir = Path(__file__).parent.parent
-    
-    nodes = {}
-    edges = []
-
-    # 全ての.mdファイルを再帰的に検索
-    for md_file in root_dir.rglob("*.md"):
-        # READMEとテンプレートは除外
-        if "README" in md_file.name or "_templates" in str(md_file):
-            continue
-
-        try:
-            content = md_file.read_text(encoding="utf-8")
-            # ---で囲まれたYAMLフロントマターを抽出
-            match = re.search(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
-            
-            if match:
-                front_matter = yaml.safe_load(match.group(1))
-                
-                service_name = front_matter.get("service_name")
-                if not service_name:
-                    continue
-
-                service_id = sanitize_id(service_name)
-                nodes[service_id] = f'{service_id}["{service_name}"]'
-
-                # inputsを処理
-                if front_matter.get("inputs"):
-                    for item in front_matter["inputs"]:
-                        source = item.get("source")
-                        if source:
-                            source_id = sanitize_id(source)
-                            nodes[source_id] = f'{source_id}("{source}")'
-                            edges.append(f"{source_id} --> {service_id}")
-
-                # outputsを処理
-                if front_matter.get("outputs"):
-                    for item in front_matter["outputs"]:
-                        target = item.get("target")
-                        if target:
-                            target_id = sanitize_id(target)
-                            nodes[target_id] = f'{target_id}("{target}")'
-                            edges.append(f"{service_id} --> {target_id}")
-        except Exception as e:
-            print(f"Error processing file {md_file}: {e}")
-
-    # Mermaidグラフのテキストを生成
-    mermaid_text = "```mermaid\ngraph TD\n"
-    for node in nodes.values():
-        mermaid_text += f"    {node}\n"
-    for edge in edges:
-        mermaid_text += f"    {edge}\n"
-    mermaid_text += "```"
-
-    # 出力ファイルパス
     output_file = root_dir / "architecture" / "02_data-flow.md"
     
-    output_content = f"""# Data Flow Diagram
+    components = {}
+    connections = set()
+
+    # --- パス1: 全てのコンポーネントを発見 ---
+    for md_file in root_dir.rglob("*.md"):
+        # READMEとテンプレートは除外
+        if "README" in md_file.name or "_templates" in str(md_file) or "architecture" in str(md_file):
+            continue
+
+        data = parse_markdown_frontmatter(md_file)
+        if not data:
+            continue
+            
+        if 'service_name' in data:
+            name = data['service_name']
+            comp_id = to_mermaid_id(name)
+            if comp_id not in components:
+                components[comp_id] = name
+
+        for item in data.get('inputs', []):
+            source_name = item.get('source')
+            if source_name:
+                source_id = to_mermaid_id(source_name)
+                if source_id not in components:
+                    components[source_id] = source_name
+        
+        for item in data.get('outputs', []):
+            target_name = item.get('target')
+            if target_name:
+                target_id = to_mermaid_id(target_name)
+                if target_id not in components:
+                    components[target_id] = target_name
+
+    # --- パス2: 正規化されたIDを使用して接続を構築 ---
+    for md_file in root_dir.rglob("*.md"):
+        if "README" in md_file.name or "_templates" in str(md_file) or "architecture" in str(md_file):
+            continue
+
+        data = parse_markdown_frontmatter(md_file)
+        if not data or 'service_name' not in data:
+            continue
+
+        service_id = to_mermaid_id(data['service_name'])
+
+        for item in data.get('inputs', []):
+            source_name = item.get('source')
+            if source_name:
+                source_id = to_mermaid_id(source_name)
+                connections.add(f"    {source_id} --> {service_id}")
+
+        for item in data.get('outputs', []):
+            target_name = item.get('target')
+            if target_name:
+                target_id = to_mermaid_id(target_name)
+                connections.add(f"    {service_id} --> {target_id}")
+
+    # --- Mermaidマークダウンファイルを生成 ---
+    mermaid_content = "```mermaid\ngraph TD\n"
+    
+    # ノード定義を追加
+    mermaid_content += "    %% --- Node Definitions ---\n"
+    for comp_id, name in sorted(components.items()):
+        # ラベル内の引用符をエスケープ
+        display_name = name.replace('"', '&quot;')
+        mermaid_content += f'    {comp_id}["{display_name}"]\n'
+    
+    mermaid_content += "\n    %% --- Connections ---\n"
+    # 接続を追加
+    mermaid_content += "\n".join(sorted(list(connections)))
+    
+    mermaid_content += "\n```\n"
+
+    # 最終的なマークダウンファイルを書き出す
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_text = f"""# Data Flow Diagram
 (This file is auto-generated by a script. Do not edit manually.)
 
-{mermaid_text}
+{mermaid_content}
 """
-    # ファイルに書き込み
-    output_file.write_text(output_content, encoding="utf-8")
-    print(f"Successfully generated data flow diagram at: {output_file}")
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(output_text)
+
+    print(f"Diagram successfully generated at {output_file}")
+
 
 if __name__ == "__main__":
     main()
