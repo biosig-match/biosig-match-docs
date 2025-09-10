@@ -1,7 +1,4 @@
 ---
-# このファイルはRabbitMQのFan-out関係を定義します。
-# スクリプトはこの特殊な'exchange_fanout'キーを解釈し、
-# ExchangeからQueueへの接続を生成します。
 exchange_fanout:
   name: "RabbitMQ (Fanout Exchange: raw_data_exchange)"
   outputs:
