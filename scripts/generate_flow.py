@@ -164,45 +164,48 @@ def main():
                 discovered_ids.add(target_id)
                 connections.add(f"    {service_id} --> {target_id};")
     
-    mermaid_lines = ["graph LR"]
-
-    # --- サブグラフ定義 ---
+    # --- 変更点: 各ブロックを独立したリストとして構築 ---
+    subgraph_lines = []
     for subgraph_name, members in SUBGRAPH_STRUCTURE.items():
         drawable_members = [m for m in members if m in discovered_ids]
         if not drawable_members:
             continue
         
-        # --- 変更点: 前のブロックとの間に空行を挿入 ---
-        mermaid_lines.append("") 
-        mermaid_lines.append(f'    subgraph "{subgraph_name}"')
+        subgraph_lines.append(f'    subgraph "{subgraph_name}"')
         if subgraph_name in ["API & Data Ingestion", "Backend Processing", "Storage Layer", "Management & Export"]:
-             mermaid_lines.append("        direction TB")
+             subgraph_lines.append("        direction TB")
         for member_id in drawable_members:
             if member_id in COMPONENTS_META:
                 meta = COMPONENTS_META[member_id]
-                mermaid_lines.append(f'        {member_id}["{meta["icon"]} {meta["label"]}"];')
-        mermaid_lines.append("    end")
+                subgraph_lines.append(f'        {member_id}["{meta["icon"]} {meta["label"]}"];')
+        subgraph_lines.append("    end")
 
-    # --- スタイル定義 ---
-    # --- 変更点: 前のブロックとの間に空行を挿入 ---
-    mermaid_lines.append("") 
-    mermaid_lines.append("    %% --- Styling ---")
-    mermaid_lines.append("    style \"External Actors\" fill:#e3f2fd,stroke:#333;")
-    mermaid_lines.append("    style \"External Services\" fill:#f0e6f6,stroke:#333;")
-    mermaid_lines.append("    style \"Mobile Client\" fill:#e8f5e9,stroke:#333;")
-    mermaid_lines.append("    classDef storage fill:#f8d7da,stroke:#721c24;")
-    mermaid_lines.append("    class MinIO,PostgreSQL storage;")
-    mermaid_lines.append("    classDef queue fill:#fff3cd,stroke:#856404;")
-    mermaid_lines.append("    class RawDataExchange,ProcessingQueue,AnalysisQueue queue;")
+    style_lines = [
+        "    %% --- Styling ---",
+        "    style \"External Actors\" fill:#e3f2fd,stroke:#333;",
+        "    style \"External Services\" fill:#f0e6f6,stroke:#333;",
+        "    style \"Mobile Client\" fill:#e8f5e9,stroke:#333;",
+        "    classDef storage fill:#f8d7da,stroke:#721c24;",
+        "    class MinIO,PostgreSQL storage;",
+        "    classDef queue fill:#fff3cd,stroke:#856404;",
+        "    class RawDataExchange,ProcessingQueue,AnalysisQueue queue;"
+    ]
 
-    # --- 接続定義 ---
+    connection_lines = []
     if connections:
-        # --- 変更点: 前のブロックとの間に空行を挿入 ---
-        mermaid_lines.append("") 
-        mermaid_lines.append("    %% --- Connections ---")
-        mermaid_lines.extend(sorted(list(connections)))
+        connection_lines.append("    %% --- Connections ---")
+        connection_lines.extend(sorted(list(connections)))
     
-    mermaid_content = "\n".join(mermaid_lines)
+    # --- 変更点: 各ブロックを空行(2つの改行)で結合 ---
+    final_blocks = ["graph LR"]
+    if subgraph_lines:
+        final_blocks.append("\n".join(subgraph_lines))
+    if style_lines:
+        final_blocks.append("\n".join(style_lines))
+    if connection_lines:
+        final_blocks.append("\n".join(connection_lines))
+
+    mermaid_content = "\n\n".join(final_blocks)
     
     with open(temp_mermaid_file, 'w', encoding='utf-8') as f:
         f.write(mermaid_content)
