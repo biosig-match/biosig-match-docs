@@ -39,5 +39,5 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "docs: Auto-generate data flow diagram image"
-          # --- 変更点: コミット対象をmdファイルとsvgファイルに変更 ---
-          file_pattern: "architecture/02-data-flow.md architecture/data-flow-diagram.svg"
+          # --- 変更点: コミット対象にpuppeteer-config.jsonを追加 ---
+          file_pattern: "architecture/02-data-flow.md architecture/data-flow-diagram.svg scripts/puppeteer-config.json"

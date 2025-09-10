@@ -1,208 +1,35 @@
-import re
-import yaml
-from pathlib import Path
-import unicodedata
-import subprocess
-import shutil
-import sys
-
-# --- 名称の揺れを吸収するためのマッピング ---
-NAME_TO_ID_MAP = {
-    "（データ紐付けワーカー）": "DataLinkageWorker",
-    "非同期タスクキュー (例: Celery)": "DataLinkageWorker",
-    "Async Task Queue (DataLinker)": "DataLinkageWorker",
-    "Firmware (ESP32)": "Firmware_BLE",
-    "ファームウェア (BLE)": "Firmware_BLE",
-    "スマートフォンアプリ": "SmartphoneApp",
-    "Smartphone App": "SmartphoneApp",
-    "Collectorサービス": "CollectorService",
-    "Collector Service": "CollectorService",
-    "Processorサービス": "ProcessorService",
-    "Processor Service": "ProcessorService",
-    "Realtime Analyzerサービス": "RealtimeAnalyzerService",
-    "Realtime Analyzer Service": "RealtimeAnalyzerService",
-    "Session Managerサービス": "SessionManagerService",
-    "Session Manager Service": "SessionManagerService",
-    "BIDS Exporterサービス": "BIDSExporterService",
-    "BIDS Exporter Service": "BIDSExporterService",
-    "MinIO (オブジェクトストレージ)": "MinIO",
-    "PostgreSQL": "PostgreSQL",
-    "PostgreSQL Database": "PostgreSQL",
-    "ユーザー": "User",
-    "ユーザー (via API Call)": "User",
-    "RabbitMQ (Fanout Exchange: raw_data_exchange)": "RawDataExchange",
-    "RabbitMQ (processing_queue)": "ProcessingQueue",
-    "RabbitMQ (analysis_queue)": "AnalysisQueue",
-}
-
-
-def to_mermaid_id(text, components_meta):
-    """
-    文字列をMermaid.jsの有効なノードIDに変換します。
-    """
-    if not isinstance(text, str):
-        return ""
-
-    original_text = text
-    normalized_text = unicodedata.normalize('NFKC', text).strip()
-
-    if normalized_text in NAME_TO_ID_MAP:
-        return NAME_TO_ID_MAP[normalized_text]
-
-    for component_id, meta in components_meta.items():
-        label_without_br = meta.get("label", "").replace("<br>", " ")
-        if normalized_text == label_without_br or normalized_text == component_id:
-            return component_id
-            
-    text_without_parens = re.sub(r'[\(（].*?[\)）]', '', normalized_text).strip()
-    if text_without_parens in NAME_TO_ID_MAP:
-        return NAME_TO_ID_MAP[text_without_parens]
-
-    print(f"Warning: Could not find a matching ID for '{original_text}'. It will be skipped.")
-    return ""
-
-
-def parse_markdown_frontmatter(file_path):
-    """
-    マークダウンファイルからYAMLフロントマターを解析します。
-    """
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-    except IOError:
-        return None
-    
-    match = re.search(r'^---\s*\n(.*?)\n---', content, re.DOTALL)
-    if not match:
-        return None
-        
-    try:
-        return yaml.safe_load(match.group(1))
-    except yaml.YAMLError as e:
-        print(f"Error parsing YAML in {file_path}: {e}")
-        return None
-
+# ... existing code ...
 def main():
     root_dir = Path(__file__).parent.parent
     architecture_dir = root_dir / "architecture"
-    output_md_file = architecture_dir / "02-data-flow.md"
-    # --- 変更点: 出力ファイル名を定義 ---
+# ... existing code ...
     output_image_file = architecture_dir / "data-flow-diagram.svg"
     temp_mermaid_file = architecture_dir / "temp_diagram.mmd"
 
     
     COMPONENTS_META = {
         'User': {"label": "User", "icon": "fa:fa-user"},
-        'Firmware_BLE': {"label": "Firmware (BLE)", "icon": "fa:fa-microchip"},
-        'SmartphoneApp': {"label": "Smartphone App", "icon": "fa:fa-mobile-alt"},
-        'CollectorService': {"label": "Collector Service", "icon": "fa:fa-server"},
-        'RawDataExchange': {"label": "RabbitMQ Exchange<br>(raw_data_exchange)", "icon": "fa:fa-exchange"},
-        'ProcessingQueue': {"label": "Processing Queue", "icon": "fa:fa-inbox"},
-        'AnalysisQueue': {"label": "Analysis Queue", "icon": "fa:fa-inbox"},
+# ... existing code ...
         'ProcessorService': {"label": "Processor Service", "icon": "fa:fa-cogs"},
         'RealtimeAnalyzerService': {"label": "Realtime Analyzer", "icon": "fa:fa-chart-line"},
+        # --- 変更点: 未定義だったAPIサーバーを追加 ---
+        'APIServer': {"label": "External API", "icon": "fa:fa-cloud"},
         'MinIO': {"label": "MinIO<br>(Object Storage)", "icon": "fa:fa-database"},
         'PostgreSQL': {"label": "PostgreSQL<br>(Metadata DB)", "icon": "fa:fa-database"},
         'SessionManagerService': {"label": "Session Manager", "icon": "fa:fa-tasks"},
-        'BIDSExporterService': {"label": "BIDS Exporter", "icon": "fa:fa-file-archive"},
+# ... existing code ...
         'DataLinkageWorker': {"label": "Async Task Queue<br>(DataLinker)", "icon": "fa:fa-rocket"}
     }
     
     SUBGRAPH_STRUCTURE = {
         "External Actors": ['User', 'Firmware_BLE'],
+        # --- 変更点: APIサーバー用のサブグラフを追加 ---
+        "External Services": ['APIServer'],
         "Mobile Client": ['SmartphoneApp'],
         "API & Data Ingestion": ['CollectorService', 'RawDataExchange', 'ProcessingQueue', 'AnalysisQueue'],
         "Backend Processing": ['ProcessorService', 'RealtimeAnalyzerService'],
-        "Storage Layer": ['MinIO', 'PostgreSQL'],
-        "Management & Export": ['SessionManagerService', 'BIDSExporterService', 'DataLinkageWorker']
-    }
-
-    connections = set()
-    discovered_ids = set()
-
-    for md_file in root_dir.rglob("*.md"):
-        if any(part in str(md_file) for part in ["README", "_templates", "architecture"]):
-            continue
-
-        data = parse_markdown_frontmatter(md_file)
-        if not data:
-            continue
-        
-        if 'exchange_fanout' in data:
-            fanout_data = data['exchange_fanout']
-            exchange_name = fanout_data.get('name')
-            exchange_id = to_mermaid_id(exchange_name, COMPONENTS_META)
-            if exchange_id:
-                discovered_ids.add(exchange_id)
-                for target_queue in fanout_data.get('outputs', []):
-                    queue_id = to_mermaid_id(target_queue, COMPONENTS_META)
-                    if queue_id:
-                        discovered_ids.add(queue_id)
-                        connections.add(f"    {exchange_id} --> {queue_id};")
-            continue
-
-        if 'service_name' not in data:
-            continue
-
-        service_id = to_mermaid_id(data['service_name'], COMPONENTS_META)
-        if service_id:
-            discovered_ids.add(service_id)
-
-        for item in data.get('inputs', []):
-            source_name = item.get('source')
-            source_id = to_mermaid_id(source_name, COMPONENTS_META)
-            if source_id and service_id:
-                discovered_ids.add(source_id)
-                connections.add(f"    {source_id} --> {service_id};")
-
-        for item in data.get('outputs', []):
-            target_name = item.get('target')
-            target_id = to_mermaid_id(target_name, COMPONENTS_META)
-            if service_id and target_id:
-                discovered_ids.add(target_id)
-                connections.add(f"    {service_id} --> {target_id};")
-    
-    mermaid_lines = ["graph LR\n"]
-
-    for subgraph_name, members in SUBGRAPH_STRUCTURE.items():
-        drawable_members = [m for m in members if m in discovered_ids]
-        if not drawable_members:
-            continue
-
-        mermaid_lines.append(f'    subgraph "{subgraph_name}"')
-        if subgraph_name in ["API & Data Ingestion", "Backend Processing", "Storage Layer", "Management & Export"]:
-             mermaid_lines.append("        direction TB")
-        for member_id in drawable_members:
-            if member_id in COMPONENTS_META:
-                meta = COMPONENTS_META[member_id]
-                mermaid_lines.append(f'        {member_id}["{meta["icon"]} {meta["label"]}"];')
-        mermaid_lines.append("    end\n")
-
-    mermaid_lines.append("    %% --- Styling ---")
-    mermaid_lines.append("    style \"External Actors\" fill:#e3f2fd,stroke:#333;")
-    mermaid_lines.append("    style \"Mobile Client\" fill:#e8f5e9,stroke:#333;")
-    mermaid_lines.append("    classDef storage fill:#f8d7da,stroke:#721c24;")
-    mermaid_lines.append("    class MinIO,PostgreSQL storage;")
-    mermaid_lines.append("    classDef queue fill:#fff3cd,stroke:#856404;")
-    mermaid_lines.append("    class RawDataExchange,ProcessingQueue,AnalysisQueue queue;\n")
-
-    if connections:
-        mermaid_lines.append("    %% --- Connections ---")
-        mermaid_lines.extend(sorted(list(connections)))
-    
-    mermaid_content = "\n".join(mermaid_lines)
-    
-    # --- 変更点: Mermaidコードを一時ファイルに書き出す ---
-    with open(temp_mermaid_file, 'w', encoding='utf-8') as f:
-        f.write(mermaid_content)
-
-    # --- 変更点: mermaid-cliを使ってSVG画像を生成 ---
-    print("Generating SVG from Mermaid definition...")
-    if not shutil.which("mmdc"):
-        print("Error: mermaid-cli (mmdc) not found.", file=sys.stderr)
-        print("Please install it via npm: npm install -g @mermaid-js/mermaid-cli", file=sys.stderr)
-        sys.exit(1)
-        
+# ... existing code ...
+# ... existing code ...
     try:
         subprocess.run(
             [
@@ -210,32 +37,9 @@ def main():
                 "-i", str(temp_mermaid_file),
                 "-o", str(output_image_file),
                 "-b", "transparent", # 背景を透過に
+                # --- 変更点: puppeteer設定ファイルを読み込ませる ---
+                "-p", str(root_dir / "scripts" / "puppeteer-config.json"),
             ],
             check=True,
             capture_output=True,
-            text=True
-        )
-        print(f"Diagram successfully generated at {output_image_file}")
-    except subprocess.CalledProcessError as e:
-        print(f"Error generating diagram with mmdc: {e}", file=sys.stderr)
-        print(f"Stderr: {e.stderr}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        # --- 変更点: 一時ファイルを削除 ---
-        if temp_mermaid_file.exists():
-            temp_mermaid_file.unlink()
-
-    # --- 変更点: 画像を埋め込むMarkdownファイルを生成 ---
-    output_text = f"""# Data Flow Diagram
-(This file is auto-generated by a script. Do not edit manually.)
-
-![Data Flow Diagram](./{output_image_file.name})
-"""
-    with open(output_md_file, 'w', encoding='utf-8') as f:
-        f.write(output_text)
-
-    print(f"Markdown file successfully updated at {output_md_file}")
-
-if __name__ == "__main__":
-    main()
-
+# ... existing code ...
