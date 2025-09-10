@@ -8,7 +8,7 @@ inputs:
   - source: "PostgreSQL"
     data_format: "SQL SELECT"
     schema: "指定された`experiment_id`に属する全てのセッションメタデータ"
-  - source: "MinIO (オブジェクトストレージ)"
+  - source: "MinIO"
     data_format: "Object GET"
     schema: "セッションに対応する生データオブジェクト群"
 outputs:

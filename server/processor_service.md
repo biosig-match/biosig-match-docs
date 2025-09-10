@@ -9,7 +9,7 @@ inputs:
     data_format: "HTTP POST"
     schema: "時刻同期オフセット情報、メディアファイル"
 outputs:
-  - target: "MinIO (オブジェクトストレージ)"
+  - target: "MinIO"
     data_format: "Zstandard圧縮されたバイナリデータ"
     schema: "EEG, IMUなどのデータ種別ごとに分離されたファイル"
 ---

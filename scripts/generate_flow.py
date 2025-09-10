@@ -2,9 +2,8 @@ import re
 import yaml
 from pathlib import Path
 import unicodedata
-import subprocess
-import shutil
 import sys
+from graphviz import Digraph
 
 # --- 名称の揺れを吸収するためのマッピング ---
 NAME_TO_ID_MAP = {
@@ -26,6 +25,7 @@ NAME_TO_ID_MAP = {
     "BIDS Exporterサービス": "BIDSExporterService",
     "BIDS Exporter Service": "BIDSExporterService",
     "MinIO (オブジェクトストレージ)": "MinIO",
+    "MinIO": "MinIO",
     "PostgreSQL": "PostgreSQL",
     "PostgreSQL Database": "PostgreSQL",
     "ユーザー": "User",
@@ -37,9 +37,9 @@ NAME_TO_ID_MAP = {
 }
 
 
-def to_mermaid_id(text, components_meta):
+def to_id(text, components_meta):
     """
-    文字列をMermaid.jsの有効なノードIDに変換します。
+    文字列をGraphvizの有効なノードIDに変換します。
     """
     if not isinstance(text, str):
         return ""
@@ -51,8 +51,8 @@ def to_mermaid_id(text, components_meta):
         return NAME_TO_ID_MAP[normalized_text]
 
     for component_id, meta in components_meta.items():
-        label_without_br = meta.get("label", "").replace("<br>", " ")
-        if normalized_text == label_without_br or normalized_text == component_id:
+        label_for_compare = meta.get("label", "").replace("\n", " ")
+        if normalized_text == label_for_compare or normalized_text == component_id:
             return component_id
             
     text_without_parens = re.sub(r'[\(（].*?[\)）]', '', normalized_text).strip()
@@ -86,27 +86,25 @@ def parse_markdown_frontmatter(file_path):
 def main():
     root_dir = Path(__file__).parent.parent
     architecture_dir = root_dir / "architecture"
-    output_md_file = architecture_dir / "02-data-flow.md"
-    output_image_file = architecture_dir / "data-flow-diagram.svg"
-    temp_mermaid_file = architecture_dir / "temp_diagram.mmd"
-
+    output_md_file = architecture_dir / "02_data-flow.md"
+    output_filename = "data-flow-diagram"
     
     COMPONENTS_META = {
-        'User': {"label": "User", "icon": "fa:fa-user"},
-        'Firmware_BLE': {"label": "Firmware (BLE)", "icon": "fa:fa-microchip"},
-        'SmartphoneApp': {"label": "Smartphone App", "icon": "fa:fa-mobile-alt"},
-        'CollectorService': {"label": "Collector Service", "icon": "fa:fa-server"},
-        'RawDataExchange': {"label": "RabbitMQ Exchange<br>(raw_data_exchange)", "icon": "fa:fa-exchange"},
-        'ProcessingQueue': {"label": "Processing Queue", "icon": "fa:fa-inbox"},
-        'AnalysisQueue': {"label": "Analysis Queue", "icon": "fa:fa-inbox"},
-        'ProcessorService': {"label": "Processor Service", "icon": "fa:fa-cogs"},
-        'RealtimeAnalyzerService': {"label": "Realtime Analyzer", "icon": "fa:fa-chart-line"},
-        'APIServer': {"label": "External API", "icon": "fa:fa-cloud"},
-        'MinIO': {"label": "MinIO<br>(Object Storage)", "icon": "fa:fa-database"},
-        'PostgreSQL': {"label": "PostgreSQL<br>(Metadata DB)", "icon": "fa:fa-database"},
-        'SessionManagerService': {"label": "Session Manager", "icon": "fa:fa-tasks"},
-        'BIDSExporterService': {"label": "BIDS Exporter", "icon": "fa:fa-file-archive"},
-        'DataLinkageWorker': {"label": "Async Task Queue<br>(DataLinker)", "icon": "fa:fa-rocket"}
+        'User': {"label": "User", "description": "System User"},
+        'Firmware_BLE': {"label": "Firmware (BLE)", "description": "Data acquisition firmware"},
+        'SmartphoneApp': {"label": "Smartphone App", "description": "Mobile client and data relay"},
+        'CollectorService': {"label": "Collector Service", "description": "API gateway for raw data ingestion"},
+        'RawDataExchange': {"label": "RabbitMQ Exchange\n(raw_data_exchange)", "description": "Fanout exchange for data distribution"},
+        'ProcessingQueue': {"label": "Processing Queue", "description": "Queue for data persistence tasks"},
+        'AnalysisQueue': {"label": "Analysis Queue", "description": "Queue for real-time analysis tasks"},
+        'ProcessorService': {"label": "Processor Service", "description": "Processes and persists raw data"},
+        'RealtimeAnalyzerService': {"label": "Realtime Analyzer", "description": "Performs real-time analysis"},
+        'APIServer': {"label": "External API", "description": "Third-party or external APIs"},
+        'MinIO': {"label": "MinIO\n(Object Storage)", "description": "Scalable storage for raw data objects"},
+        'PostgreSQL': {"label": "PostgreSQL\n(Metadata DB)", "description": "Relational database for all metadata"},
+        'SessionManagerService': {"label": "Session Manager", "description": "Manages experiment and session lifecycles"},
+        'BIDSExporterService': {"label": "BIDS Exporter", "description": "Exports data in BIDS format"},
+        'DataLinkageWorker': {"label": "Async Task Queue\n(DataLinker)", "description": "Asynchronous worker for data linkage"}
     }
     
     SUBGRAPH_STRUCTURE = {
@@ -119,8 +117,10 @@ def main():
         "Management & Export": ['SessionManagerService', 'BIDSExporterService', 'DataLinkageWorker']
     }
 
-    connections = set()
+    # --- 変更点: 接続情報をより詳細に保持する辞書 ---
+    connections = {}
     discovered_ids = set()
+    node_descriptions = {}
 
     for md_file in root_dir.rglob("*.md"):
         if any(part in str(md_file) for part in ["README", "_templates", "architecture"]):
@@ -130,123 +130,120 @@ def main():
         if not data:
             continue
         
+        # --- 変更点: fanoutの接続情報も詳細に保持 ---
         if 'exchange_fanout' in data:
             fanout_data = data['exchange_fanout']
             exchange_name = fanout_data.get('name')
-            exchange_id = to_mermaid_id(exchange_name, COMPONENTS_META)
+            exchange_id = to_id(exchange_name, COMPONENTS_META)
             if exchange_id:
                 discovered_ids.add(exchange_id)
-                for target_queue in fanout_data.get('outputs', []):
-                    queue_id = to_mermaid_id(target_queue, COMPONENTS_META)
-                    if queue_id:
-                        discovered_ids.add(queue_id)
-                        connections.add(f"    {exchange_id} --> {queue_id};")
+                node_descriptions[exchange_id] = fanout_data.get('description', COMPONENTS_META[exchange_id].get('description'))
+                for item in fanout_data.get('outputs', []):
+                    # fanoutは単純なリストなので、itemが直接target名
+                    target_id = to_id(item, COMPONENTS_META)
+                    if target_id:
+                        discovered_ids.add(target_id)
+                        conn_key = (exchange_id, target_id)
+                        connections[conn_key] = {
+                            "label": "AMQP Message",
+                            "tooltip": "Fanout distribution"
+                        }
             continue
 
         if 'service_name' not in data:
             continue
 
-        service_id = to_mermaid_id(data['service_name'], COMPONENTS_META)
+        service_id = to_id(data['service_name'], COMPONENTS_META)
         if service_id:
             discovered_ids.add(service_id)
+            node_descriptions[service_id] = data.get('description', COMPONENTS_META[service_id].get('description'))
 
+        # --- 変更点: inputsから詳細情報を抽出 ---
         for item in data.get('inputs', []):
-            source_name = item.get('source')
-            source_id = to_mermaid_id(source_name, COMPONENTS_META)
+            source_id = to_id(item.get('source'), COMPONENTS_META)
             if source_id and service_id:
                 discovered_ids.add(source_id)
-                connections.add(f"    {source_id} --> {service_id};")
+                conn_key = (source_id, service_id)
+                connections[conn_key] = {
+                    "label": item.get('data_format', ''),
+                    "tooltip": f"Schema: {item.get('schema', 'N/A')}"
+                }
 
+        # --- 変更点: outputsから詳細情報を抽出 (inputsを優先) ---
         for item in data.get('outputs', []):
-            target_name = item.get('target')
-            target_id = to_mermaid_id(target_name, COMPONENTS_META)
+            target_id = to_id(item.get('target'), COMPONENTS_META)
             if service_id and target_id:
                 discovered_ids.add(target_id)
-                connections.add(f"    {service_id} --> {target_id};")
-    
-    # --- 変更点: 各ブロックを独立したリストとして構築 ---
-    subgraph_lines = []
-    for subgraph_name, members in SUBGRAPH_STRUCTURE.items():
+                conn_key = (service_id, target_id)
+                # inputsで既定義でなければoutputsの情報を使う
+                if conn_key not in connections:
+                     connections[conn_key] = {
+                        "label": item.get('data_format', ''),
+                        "tooltip": f"Schema: {item.get('schema', 'N/A')}"
+                    }
+
+    # Graphvizオブジェクトの作成
+    dot = Digraph(comment='Data Flow Diagram')
+    dot.attr(rankdir='LR', splines='ortho', nodesep='0.8', ranksep='1.5', label='Interactive Data Flow Diagram', labelloc='t', fontsize='20')
+    dot.attr('node', shape='box', style='rounded,filled', fontname='Arial', fontsize='12')
+    dot.attr('edge', fontname='Arial', fontsize='10')
+
+    # サブグラフ(クラスター)とノードの定義
+    for i, (subgraph_name, members) in enumerate(SUBGRAPH_STRUCTURE.items()):
         drawable_members = [m for m in members if m in discovered_ids]
         if not drawable_members:
             continue
-        
-        subgraph_lines.append(f'    subgraph "{subgraph_name}"')
-        if subgraph_name in ["API & Data Ingestion", "Backend Processing", "Storage Layer", "Management & Export"]:
-             subgraph_lines.append("        direction TB")
-        for member_id in drawable_members:
-            if member_id in COMPONENTS_META:
-                meta = COMPONENTS_META[member_id]
-                subgraph_lines.append(f'        {member_id}["{meta["icon"]} {meta["label"]}"];')
-        subgraph_lines.append("    end")
 
-    style_lines = [
-        "    %% --- Styling ---",
-        "    style \"External Actors\" fill:#e3f2fd,stroke:#333;",
-        "    style \"External Services\" fill:#f0e6f6,stroke:#333;",
-        "    style \"Mobile Client\" fill:#e8f5e9,stroke:#333;",
-        "    classDef storage fill:#f8d7da,stroke:#721c24;",
-        "    class MinIO,PostgreSQL storage;",
-        "    classDef queue fill:#fff3cd,stroke:#856404;",
-        "    class RawDataExchange,ProcessingQueue,AnalysisQueue queue;"
-    ]
+        with dot.subgraph(name=f'cluster_{i}') as c:
+            c.attr(label=subgraph_name, style='rounded,filled', color='#eeeeee', fontcolor='black', fontsize='16')
+            if subgraph_name in ["API & Data Ingestion", "Backend Processing", "Storage Layer", "Management & Export"]:
+                c.attr(rankdir='TB')
 
-    connection_lines = []
-    if connections:
-        connection_lines.append("    %% --- Connections ---")
-        connection_lines.extend(sorted(list(connections)))
+            for member_id in drawable_members:
+                if member_id in COMPONENTS_META:
+                    meta = COMPONENTS_META[member_id]
+                    fillcolor = 'white'
+                    if 'Storage' in subgraph_name or 'DB' in meta['label']:
+                        fillcolor = '#f8d7da'
+                    elif 'Queue' in meta['label'] or 'Exchange' in meta['label']:
+                        fillcolor = '#fff3cd'
+                    elif 'External' in subgraph_name:
+                         fillcolor = '#e3f2fd'
+                    elif 'Mobile' in subgraph_name:
+                         fillcolor = '#e8f5e9'
+                    
+                    # --- 変更点: ノードにツールチップを追加 ---
+                    node_tooltip = node_descriptions.get(member_id, meta.get('description', 'No description available.'))
+                    c.node(member_id, label=meta['label'], fillcolor=fillcolor, tooltip=node_tooltip)
     
-    # --- 変更点: 各ブロックを空行(2つの改行)で結合 ---
-    final_blocks = ["graph LR"]
-    if subgraph_lines:
-        final_blocks.append("\n".join(subgraph_lines))
-    if style_lines:
-        final_blocks.append("\n".join(style_lines))
-    if connection_lines:
-        final_blocks.append("\n".join(connection_lines))
+    # --- 変更点: 接続とツールチップの描画 ---
+    for (source, target), details in connections.items():
+        dot.edge(source, target, label=details.get('label'), tooltip=details.get('tooltip'), labelfontsize='9')
 
-    mermaid_content = "\n\n".join(final_blocks)
-    
-    with open(temp_mermaid_file, 'w', encoding='utf-8') as f:
-        f.write(mermaid_content)
-
-    print("Generating SVG from Mermaid definition...")
-    if not shutil.which("mmdc"):
-        print("Error: mermaid-cli (mmdc) not found.", file=sys.stderr)
-        print("Please install it via npm: npm install -g @mermaid-js/mermaid-cli", file=sys.stderr)
-        sys.exit(1)
-        
+    # SVGファイルの生成
     try:
-        subprocess.run(
-            [
-                "mmdc",
-                "-i", str(temp_mermaid_file),
-                "-o", str(output_image_file),
-                "-b", "transparent",
-                "-p", str(root_dir / "scripts" / "puppeteer-config.json"),
-            ],
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        print(f"Diagram successfully generated at {output_image_file}")
-    except subprocess.CalledProcessError as e:
-        print(f"Error generating diagram with mmdc: {e}", file=sys.stderr)
-        print(f"Stderr: {e.stderr}", file=sys.stderr)
+        output_path = architecture_dir / output_filename
+        dot.render(output_path, format='svg', cleanup=True)
+        print(f"Diagram successfully generated at {output_path}.svg")
+    except Exception as e:
+        print(f"Error generating diagram with Graphviz: {e}", file=sys.stderr)
+        print("Please ensure Graphviz is installed and in your system's PATH.", file=sys.stderr)
         sys.exit(1)
-    finally:
-        if temp_mermaid_file.exists():
-            temp_mermaid_file.unlink()
 
+    # Markdownファイルの更新
+    output_image_file_name = f"{output_filename}.svg"
     output_text = f"""# Data Flow Diagram
 (This file is auto-generated by a script. Do not edit manually.)
 
-![Data Flow Diagram](./{output_image_file.name})
+**Note:** This is an interactive diagram. Hover over components and connection lines to see more details.
+
+![Data Flow Diagram](./{output_image_file_name})
 """
     with open(output_md_file, 'w', encoding='utf-8') as f:
         f.write(output_text)
 
     print(f"Markdown file successfully updated at {output_md_file}")
+
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
 ---
-service_name: "MinIO (Object Storage)"
+service_name: "MinIO"
 description: "全ての生データ（EEG/IMU, 画像, 音声など）を格納する、スケーラブルなストレージ基盤。"
 inputs:
   - source: "Processorサービス"
