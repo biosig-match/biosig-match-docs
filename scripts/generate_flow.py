@@ -81,7 +81,7 @@ def parse_markdown_frontmatter(file_path):
 
 def main():
     root_dir = Path(__file__).parent.parent
-    output_file = root_dir / "architecture" / "02_data-flow.md"
+    output_file = root_dir / "architecture" / "02-data-flow.md"
     
     COMPONENTS_META = {
         'User': {"label": "User", "icon": "fa:fa-user"},
@@ -130,7 +130,8 @@ def main():
                     queue_id = to_mermaid_id(target_queue, COMPONENTS_META)
                     if queue_id:
                         discovered_ids.add(queue_id)
-                        connections.add(f"    {exchange_id} --> {queue_id}")
+                        # --- 変更点: セミコロンを追加 ---
+                        connections.add(f"    {exchange_id} --> {queue_id};")
             continue
 
         if 'service_name' not in data:
@@ -145,14 +146,16 @@ def main():
             source_id = to_mermaid_id(source_name, COMPONENTS_META)
             if source_id and service_id:
                 discovered_ids.add(source_id)
-                connections.add(f"    {source_id} --> {service_id}")
+                # --- 変更点: セミコロンを追加 ---
+                connections.add(f"    {source_id} --> {service_id};")
 
         for item in data.get('outputs', []):
             target_name = item.get('target')
             target_id = to_mermaid_id(target_name, COMPONENTS_META)
             if service_id and target_id:
                 discovered_ids.add(target_id)
-                connections.add(f"    {service_id} --> {target_id}")
+                # --- 変更点: セミコロンを追加 ---
+                connections.add(f"    {service_id} --> {target_id};")
     
     mermaid_lines = ["graph LR\n"]
 
@@ -167,22 +170,21 @@ def main():
         for member_id in drawable_members:
             if member_id in COMPONENTS_META:
                 meta = COMPONENTS_META[member_id]
-                mermaid_lines.append(f'        {member_id}["{meta["icon"]} {meta["label"]}"]')
+                mermaid_lines.append(f'        {member_id}["{meta["icon"]} {meta["label"]}"];')
         mermaid_lines.append("    end\n")
 
     if connections:
         mermaid_lines.append("    %% --- Connections ---")
         mermaid_lines.extend(sorted(list(connections)))
-        # --- 変更点: ここに空行を追加して、接続とスタイルのブロックを明確に分離 ---
         mermaid_lines.append("")
     
     mermaid_lines.append("    %% --- Styling ---")
-    mermaid_lines.append("    style \"External Actors\" fill:#e3f2fd,stroke:#333")
-    mermaid_lines.append("    style \"Mobile Client\" fill:#e8f5e9,stroke:#333")
-    mermaid_lines.append("    classDef storage fill:#f8d7da,stroke:#721c24")
-    mermaid_lines.append("    class MinIO,PostgreSQL storage")
-    mermaid_lines.append("    classDef queue fill:#fff3cd,stroke:#856404")
-    mermaid_lines.append("    class RawDataExchange,ProcessingQueue,AnalysisQueue queue")
+    mermaid_lines.append("    style \"External Actors\" fill:#e3f2fd,stroke:#333;")
+    mermaid_lines.append("    style \"Mobile Client\" fill:#e8f5e9,stroke:#333;")
+    mermaid_lines.append("    classDef storage fill:#f8d7da,stroke:#721c24;")
+    mermaid_lines.append("    class MinIO,PostgreSQL storage;")
+    mermaid_lines.append("    classDef queue fill:#fff3cd,stroke:#856404;")
+    mermaid_lines.append("    class RawDataExchange,ProcessingQueue,AnalysisQueue queue;")
     
     mermaid_content = "\n".join(mermaid_lines)
     
