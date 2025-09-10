@@ -7,24 +7,24 @@ import unicodedata
 NAME_TO_ID_MAP = {
     "（データ紐付けワーカー）": "DataLinkageWorker",
     "非同期タスクキュー (例: Celery)": "DataLinkageWorker",
-    "Async Task Queue (DataLinker)": "DataLinkageWorker", # 追加
+    "Async Task Queue (DataLinker)": "DataLinkageWorker",
     "Firmware (ESP32)": "Firmware_BLE",
     "ファームウェア (BLE)": "Firmware_BLE",
     "スマートフォンアプリ": "SmartphoneApp",
-    "Smartphone App": "SmartphoneApp", # 追加
+    "Smartphone App": "SmartphoneApp",
     "Collectorサービス": "CollectorService",
-    "Collector Service": "CollectorService", # 追加
+    "Collector Service": "CollectorService",
     "Processorサービス": "ProcessorService",
-    "Processor Service": "ProcessorService", # 追加
+    "Processor Service": "ProcessorService",
     "Realtime Analyzerサービス": "RealtimeAnalyzerService",
-    "Realtime Analyzer Service": "RealtimeAnalyzerService", # 追加
+    "Realtime Analyzer Service": "RealtimeAnalyzerService",
     "Session Managerサービス": "SessionManagerService",
-    "Session Manager Service": "SessionManagerService", # 追加
+    "Session Manager Service": "SessionManagerService",
     "BIDS Exporterサービス": "BIDSExporterService",
-    "BIDS Exporter Service": "BIDSExporterService", # 追加
+    "BIDS Exporter Service": "BIDSExporterService",
     "MinIO (オブジェクトストレージ)": "MinIO",
     "PostgreSQL": "PostgreSQL",
-    "PostgreSQL Database": "PostgreSQL", # 追加
+    "PostgreSQL Database": "PostgreSQL",
     "ユーザー": "User",
     "ユーザー (via API Call)": "User",
     "RabbitMQ (Fanout Exchange: raw_data_exchange)": "RawDataExchange",
@@ -43,22 +43,18 @@ def to_mermaid_id(text, components_meta):
     original_text = text
     normalized_text = unicodedata.normalize('NFKC', text).strip()
 
-    # 1. 完全に一致する別名マッピングを試す
     if normalized_text in NAME_TO_ID_MAP:
         return NAME_TO_ID_MAP[normalized_text]
 
-    # 2. 表示名(label)からIDへの逆引きを試す
     for component_id, meta in components_meta.items():
         label_without_br = meta.get("label", "").replace("<br>", " ")
         if normalized_text == label_without_br or normalized_text == component_id:
             return component_id
             
-    # 3. かっこ（）とその中身を削除したもので再度マッピングを試す
     text_without_parens = re.sub(r'[\(（].*?[\)）]', '', normalized_text).strip()
     if text_without_parens in NAME_TO_ID_MAP:
         return NAME_TO_ID_MAP[text_without_parens]
 
-    # --- 警告の出力: どの名前で失敗したかを表示 ---
     print(f"Warning: Could not find a matching ID for '{original_text}'. It will be skipped.")
     return ""
 
@@ -124,7 +120,6 @@ def main():
         if not data:
             continue
         
-        # --- 変更点: RabbitMQのfan-out定義を特別に処理 ---
         if 'exchange_fanout' in data:
             fanout_data = data['exchange_fanout']
             exchange_name = fanout_data.get('name')
@@ -178,8 +173,10 @@ def main():
     if connections:
         mermaid_lines.append("    %% --- Connections ---")
         mermaid_lines.extend(sorted(list(connections)))
+        # --- 変更点: ここに空行を追加して、接続とスタイルのブロックを明確に分離 ---
+        mermaid_lines.append("")
     
-    mermaid_lines.append("\n    %% --- Styling ---")
+    mermaid_lines.append("    %% --- Styling ---")
     mermaid_lines.append("    style \"External Actors\" fill:#e3f2fd,stroke:#333")
     mermaid_lines.append("    style \"Mobile Client\" fill:#e8f5e9,stroke:#333")
     mermaid_lines.append("    classDef storage fill:#f8d7da,stroke:#721c24")
