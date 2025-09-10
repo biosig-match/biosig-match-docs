@@ -3,4 +3,60 @@
 
 ```mermaid
 graph TD
+    Processor_Service["Processor Service"]
+    RabbitMQ_processing_queue("RabbitMQ (processing_queue)")
+    スマートフォンアプリ("スマートフォンアプリ")
+    MinIO_オブジェクトストレージ("MinIO (オブジェクトストレージ)")
+    Session_Manager_Service["Session Manager Service"]
+    PostgreSQL("PostgreSQL")
+    非同期タスクキュー_例__Celery("非同期タスクキュー (例: Celery)")
+    MinIO_Object_Storage["MinIO (Object Storage)"]
+    Processorサービス("Processorサービス")
+    BIDS_Exporterサービス("BIDS Exporterサービス")
+    Realtime_Analyzer_Service["Realtime Analyzer Service"]
+    RabbitMQ_analysis_queue("RabbitMQ (analysis_queue)")
+    Collector_Service["Collector Service"]
+    RabbitMQ_Fanout_Exchange__raw_data_exchange("RabbitMQ (Fanout Exchange: raw_data_exchange)")
+    RabbitMQ["RabbitMQ"]
+    Collectorサービス("Collectorサービス")
+    Processorサービス,_Realtime_Analyzerサービス("Processorサービス, Realtime Analyzerサービス")
+    BIDS_Exporter_Service["BIDS Exporter Service"]
+    ユーザー_via_API_Call("ユーザー (via API Call)")
+    ユーザー("ユーザー")
+    PostgreSQL_Database["PostgreSQL Database"]
+    Session_Managerサービス("Session Managerサービス")
+    （データ紐付けワーカー）("（データ紐付けワーカー）")
+    BIDS_Exporterサービス,_Session_Managerサービス("BIDS Exporterサービス, Session Managerサービス")
+    Smartphone_App["Smartphone App"]
+    ファームウェア_BLE("ファームウェア (BLE)")
+    各種サーバーAPI("各種サーバーAPI")
+    Realtime_Analyzerサービス("Realtime Analyzerサービス")
+    RabbitMQ_processing_queue --> Processor_Service
+    スマートフォンアプリ --> Processor_Service
+    Processor_Service --> MinIO_オブジェクトストレージ
+    スマートフォンアプリ --> Session_Manager_Service
+    Session_Manager_Service --> PostgreSQL
+    Session_Manager_Service --> 非同期タスクキュー_例__Celery
+    Processorサービス --> MinIO_Object_Storage
+    スマートフォンアプリ --> MinIO_Object_Storage
+    MinIO_Object_Storage --> BIDS_Exporterサービス
+    RabbitMQ_analysis_queue --> Realtime_Analyzer_Service
+    Realtime_Analyzer_Service --> スマートフォンアプリ
+    スマートフォンアプリ --> Collector_Service
+    Collector_Service --> RabbitMQ_Fanout_Exchange__raw_data_exchange
+    Collectorサービス --> RabbitMQ
+    RabbitMQ --> Processorサービス,_Realtime_Analyzerサービス
+    ユーザー_via_API_Call --> BIDS_Exporter_Service
+    PostgreSQL --> BIDS_Exporter_Service
+    MinIO_オブジェクトストレージ --> BIDS_Exporter_Service
+    BIDS_Exporter_Service --> ユーザー
+    Session_Managerサービス --> PostgreSQL_Database
+    （データ紐付けワーカー） --> PostgreSQL_Database
+    PostgreSQL_Database --> BIDS_Exporterサービス,_Session_Managerサービス
+    ファームウェア_BLE --> Smartphone_App
+    ユーザー --> Smartphone_App
+    各種サーバーAPI --> Smartphone_App
+    Smartphone_App --> Collectorサービス
+    Smartphone_App --> Session_Managerサービス
+    Smartphone_App --> Realtime_Analyzerサービス
 ```
