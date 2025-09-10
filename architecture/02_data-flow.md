@@ -18,6 +18,7 @@ graph LR
         CollectorService["fa:fa-server Collector Service"]
         RawDataExchange["fa:fa-exchange RabbitMQ Exchange<br>(raw_data_exchange)"]
         ProcessingQueue["fa:fa-inbox Processing Queue"]
+        AnalysisQueue["fa:fa-inbox Analysis Queue"]
     end
 
     subgraph "Backend Processing"
@@ -29,25 +30,38 @@ graph LR
     subgraph "Storage Layer"
         direction TB
         MinIO["fa:fa-database MinIO<br>(Object Storage)"]
+        PostgreSQL["fa:fa-database PostgreSQL<br>(Metadata DB)"]
     end
 
     subgraph "Management & Export"
         direction TB
         SessionManagerService["fa:fa-tasks Session Manager"]
         BIDSExporterService["fa:fa-file-archive BIDS Exporter"]
+        DataLinkageWorker["fa:fa-rocket Async Task Queue<br>(DataLinker)"]
     end
 
     %% --- Connections ---
+    AnalysisQueue --> RealtimeAnalyzerService
+    BIDSExporterService --> User
     CollectorService --> RawDataExchange
+    DataLinkageWorker --> PostgreSQL
     Firmware_BLE --> SmartphoneApp
     MinIO --> BIDSExporterService
+    PostgreSQL --> BIDSExporterService
+    PostgreSQL --> SessionManagerService
     ProcessingQueue --> ProcessorService
     ProcessorService --> MinIO
+    RawDataExchange --> AnalysisQueue
+    RawDataExchange --> ProcessingQueue
+    RealtimeAnalyzerService --> SmartphoneApp
+    SessionManagerService --> DataLinkageWorker
+    SessionManagerService --> PostgreSQL
     SmartphoneApp --> CollectorService
     SmartphoneApp --> MinIO
     SmartphoneApp --> ProcessorService
     SmartphoneApp --> RealtimeAnalyzerService
     SmartphoneApp --> SessionManagerService
+    User --> BIDSExporterService
     User --> SmartphoneApp
 
     %% --- Styling ---
