@@ -7,16 +7,24 @@ import unicodedata
 NAME_TO_ID_MAP = {
     "（データ紐付けワーカー）": "DataLinkageWorker",
     "非同期タスクキュー (例: Celery)": "DataLinkageWorker",
+    "Async Task Queue (DataLinker)": "DataLinkageWorker", # 追加
     "Firmware (ESP32)": "Firmware_BLE",
     "ファームウェア (BLE)": "Firmware_BLE",
     "スマートフォンアプリ": "SmartphoneApp",
+    "Smartphone App": "SmartphoneApp", # 追加
     "Collectorサービス": "CollectorService",
+    "Collector Service": "CollectorService", # 追加
     "Processorサービス": "ProcessorService",
+    "Processor Service": "ProcessorService", # 追加
     "Realtime Analyzerサービス": "RealtimeAnalyzerService",
+    "Realtime Analyzer Service": "RealtimeAnalyzerService", # 追加
     "Session Managerサービス": "SessionManagerService",
+    "Session Manager Service": "SessionManagerService", # 追加
     "BIDS Exporterサービス": "BIDSExporterService",
+    "BIDS Exporter Service": "BIDSExporterService", # 追加
     "MinIO (オブジェクトストレージ)": "MinIO",
     "PostgreSQL": "PostgreSQL",
+    "PostgreSQL Database": "PostgreSQL", # 追加
     "ユーザー": "User",
     "ユーザー (via API Call)": "User",
     "RabbitMQ (Fanout Exchange: raw_data_exchange)": "RawDataExchange",
@@ -113,7 +121,24 @@ def main():
             continue
 
         data = parse_markdown_frontmatter(md_file)
-        if not data or 'service_name' not in data:
+        if not data:
+            continue
+        
+        # --- 変更点: RabbitMQのfan-out定義を特別に処理 ---
+        if 'exchange_fanout' in data:
+            fanout_data = data['exchange_fanout']
+            exchange_name = fanout_data.get('name')
+            exchange_id = to_mermaid_id(exchange_name, COMPONENTS_META)
+            if exchange_id:
+                discovered_ids.add(exchange_id)
+                for target_queue in fanout_data.get('outputs', []):
+                    queue_id = to_mermaid_id(target_queue, COMPONENTS_META)
+                    if queue_id:
+                        discovered_ids.add(queue_id)
+                        connections.add(f"    {exchange_id} --> {queue_id}")
+            continue
+
+        if 'service_name' not in data:
             continue
 
         service_id = to_mermaid_id(data['service_name'], COMPONENTS_META)
@@ -162,7 +187,6 @@ def main():
     mermaid_lines.append("    classDef queue fill:#fff3cd,stroke:#856404")
     mermaid_lines.append("    class RawDataExchange,ProcessingQueue,AnalysisQueue queue")
     
-    # --- 変更点: f-stringの外側で文字列を結合 ---
     mermaid_content = "\n".join(mermaid_lines)
     
     output_text = f"""# Data Flow Diagram

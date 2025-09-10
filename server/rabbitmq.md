@@ -1,14 +1,12 @@
 ---
-service_name: "RabbitMQ"
-description: "各マイクロサービス間を疎結合で繋ぐ、高性能なメッセージブローカー。"
-inputs:
-  - source: "Collectorサービス"
-    data_format: "AMQP Message"
-    schema: "Body: バイナリデータ, Headers: { user_id }"
-outputs:
-  - target: "Processorサービス, Realtime Analyzerサービス"
-    data_format: "AMQP Message"
-    schema: "同上"
+# このファイルはRabbitMQのFan-out関係を定義します。
+# スクリプトはこの特殊な'exchange_fanout'キーを解釈し、
+# ExchangeからQueueへの接続を生成します。
+exchange_fanout:
+  name: "RabbitMQ (Fanout Exchange: raw_data_exchange)"
+  outputs:
+    - "RabbitMQ (processing_queue)"
+    - "RabbitMQ (analysis_queue)"
 ---
 
 ## 概要
