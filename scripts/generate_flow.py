@@ -88,7 +88,7 @@ def main():
     architecture_dir = root_dir / "architecture"
     # NOTE: It's better to avoid overwriting the original file during development
     #       if the file name is changed, remember to update the .md file as well.
-    output_md_file = architecture_dir / "02-data-flow.md"
+    output_md_file = architecture_dir / "02_data-flow.md"
     output_filename = "data-flow-diagram"
 
     COMPONENTS_META = {
