@@ -33,7 +33,6 @@ NAME_TO_ID_MAP = {
     "RabbitMQ (Fanout Exchange: raw_data_exchange)": "RawDataExchange",
     "RabbitMQ (processing_queue)": "ProcessingQueue",
     "RabbitMQ (analysis_queue)": "AnalysisQueue",
-    # --- 変更点: 未定義だった「各種サーバーAPI」を追加 ---
     "各種サーバーAPI": "APIServer",
 }
 
@@ -102,7 +101,6 @@ def main():
         'AnalysisQueue': {"label": "Analysis Queue", "icon": "fa:fa-inbox"},
         'ProcessorService': {"label": "Processor Service", "icon": "fa:fa-cogs"},
         'RealtimeAnalyzerService': {"label": "Realtime Analyzer", "icon": "fa:fa-chart-line"},
-        # --- 変更点: 未定義だったAPIサーバーを追加 ---
         'APIServer': {"label": "External API", "icon": "fa:fa-cloud"},
         'MinIO': {"label": "MinIO<br>(Object Storage)", "icon": "fa:fa-database"},
         'PostgreSQL': {"label": "PostgreSQL<br>(Metadata DB)", "icon": "fa:fa-database"},
@@ -113,7 +111,6 @@ def main():
     
     SUBGRAPH_STRUCTURE = {
         "External Actors": ['User', 'Firmware_BLE'],
-        # --- 変更点: APIサーバー用のサブグラフを追加 ---
         "External Services": ['APIServer'],
         "Mobile Client": ['SmartphoneApp'],
         "API & Data Ingestion": ['CollectorService', 'RawDataExchange', 'ProcessingQueue', 'AnalysisQueue'],
@@ -167,13 +164,16 @@ def main():
                 discovered_ids.add(target_id)
                 connections.add(f"    {service_id} --> {target_id};")
     
-    mermaid_lines = ["graph LR\n"]
+    mermaid_lines = ["graph LR"]
 
+    # --- サブグラフ定義 ---
     for subgraph_name, members in SUBGRAPH_STRUCTURE.items():
         drawable_members = [m for m in members if m in discovered_ids]
         if not drawable_members:
             continue
-
+        
+        # --- 変更点: 前のブロックとの間に空行を挿入 ---
+        mermaid_lines.append("") 
         mermaid_lines.append(f'    subgraph "{subgraph_name}"')
         if subgraph_name in ["API & Data Ingestion", "Backend Processing", "Storage Layer", "Management & Export"]:
              mermaid_lines.append("        direction TB")
@@ -181,8 +181,11 @@ def main():
             if member_id in COMPONENTS_META:
                 meta = COMPONENTS_META[member_id]
                 mermaid_lines.append(f'        {member_id}["{meta["icon"]} {meta["label"]}"];')
-        mermaid_lines.append("    end\n")
+        mermaid_lines.append("    end")
 
+    # --- スタイル定義 ---
+    # --- 変更点: 前のブロックとの間に空行を挿入 ---
+    mermaid_lines.append("") 
     mermaid_lines.append("    %% --- Styling ---")
     mermaid_lines.append("    style \"External Actors\" fill:#e3f2fd,stroke:#333;")
     mermaid_lines.append("    style \"External Services\" fill:#f0e6f6,stroke:#333;")
@@ -190,9 +193,12 @@ def main():
     mermaid_lines.append("    classDef storage fill:#f8d7da,stroke:#721c24;")
     mermaid_lines.append("    class MinIO,PostgreSQL storage;")
     mermaid_lines.append("    classDef queue fill:#fff3cd,stroke:#856404;")
-    mermaid_lines.append("    class RawDataExchange,ProcessingQueue,AnalysisQueue queue;\n")
+    mermaid_lines.append("    class RawDataExchange,ProcessingQueue,AnalysisQueue queue;")
 
+    # --- 接続定義 ---
     if connections:
+        # --- 変更点: 前のブロックとの間に空行を挿入 ---
+        mermaid_lines.append("") 
         mermaid_lines.append("    %% --- Connections ---")
         mermaid_lines.extend(sorted(list(connections)))
     
@@ -214,7 +220,6 @@ def main():
                 "-i", str(temp_mermaid_file),
                 "-o", str(output_image_file),
                 "-b", "transparent",
-                # --- puppeteer設定ファイルを読み込ませる ---
                 "-p", str(root_dir / "scripts" / "puppeteer-config.json"),
             ],
             check=True,
