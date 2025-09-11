@@ -2,7 +2,7 @@
 service_name: "BIDS Exporter Service"
 description: "指定された実験データをBIDS形式に準拠した形でエクスポートするバッチ処理サービス。"
 inputs:
-  - source: "ユーザー (via API Call)"
+  - source: "ERP検出システム"
     data_format: "HTTP POST (JSON)"
     schema: "{ experiment_id }"
   - source: "PostgreSQL"
@@ -12,8 +12,8 @@ inputs:
     data_format: "Object GET"
     schema: "セッションに対応する生データオブジェクト群"
 outputs:
-  - target: "ユーザー"
-    data_format: "ZIPファイル"
+  - target: "ERP検出システム"
+    data_format: "BIDS"
     schema: "BIDS形式のディレクトリ構造を持つデータセット"
 ---
 

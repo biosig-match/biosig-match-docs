@@ -5,6 +5,12 @@ inputs:
   - source: "スマートフォンアプリ"
     data_format: "HTTP POST (JSON)"
     schema: "{ user_id, payload_base64 }"
+  - source: "スマートフォンアプリ"
+    data_format: "画像/音声ファイル"
+    schema: "JPEG, WAVなど"
+  - source: "スマートフォンアプリ"
+    data_format: "HTTP POST"
+    schema: "時刻同期オフセット情報、メディアファイル"
 outputs:
   - target: "RabbitMQ (Fanout Exchange: raw_data_exchange)"
     data_format: "AMQP Message"
@@ -13,7 +19,7 @@ outputs:
 
 ## 概要
 
-`Collector`は、スマートフォンアプリから送信される全ての生データ（EEG/IMU）を受け付ける唯一の窓口です。受け取ったデータに対して一切の処理を行わず、メタデータ（`user_id`）をヘッダーに付与し、圧縮データ本体をメッセージボディとして RabbitMQ の Exchange に即座に発行（Publish）します。
+`Collector`は、スマートフォンアプリから送信される全ての生データ（EEG/IMU，画像/音声ファイル）を受け付ける唯一の窓口です。受け取ったデータに対して一切の処理を行わず、メタデータ（`user_id`）をヘッダーに付与し、圧縮データ本体をメッセージボディとして RabbitMQ の Exchange に即座に発行（Publish）します。
 
 ## 詳細
 

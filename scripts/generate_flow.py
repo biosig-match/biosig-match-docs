@@ -34,6 +34,7 @@ NAME_TO_ID_MAP = {
     "RabbitMQ (processing_queue)": "ProcessingQueue",
     "RabbitMQ (analysis_queue)": "AnalysisQueue",
     "各種サーバーAPI": "APIServer",
+    "ERP検出システム": "APIServer",
 }
 
 
@@ -85,9 +86,14 @@ def parse_markdown_frontmatter(file_path):
 
 def main():
     root_dir = Path(__file__).parent.parent
+    # NOTE: Assuming the script is in a 'scripts' directory or similar. 
+    # Adjust if your structure is different.
+    if not root_dir.exists() or not any(root_dir.iterdir()):
+        root_dir = Path.cwd() # Fallback to current working directory
+        
     architecture_dir = root_dir / "architecture"
-    # NOTE: It's better to avoid overwriting the original file during development
-    #       if the file name is changed, remember to update the .md file as well.
+    architecture_dir.mkdir(exist_ok=True)
+    
     output_md_file = architecture_dir / "02_data-flow.md"
     output_filename = "data-flow-diagram"
 
@@ -101,7 +107,7 @@ def main():
         'AnalysisQueue': {"label": "Analysis Queue", "description": "Queue for real-time analysis tasks"},
         'ProcessorService': {"label": "Processor Service", "description": "Processes and persists raw data"},
         'RealtimeAnalyzerService': {"label": "Realtime Analyzer", "description": "Performs real-time analysis"},
-        'APIServer': {"label": "External API", "description": "Third-party or external APIs"},
+        'APIServer': {"label": "External API", "description": "Third-party or external APIs (e.g., ERP Detection System)"},
         'MinIO': {"label": "MinIO\n(Object Storage)", "description": "Scalable storage for raw data objects"},
         'PostgreSQL': {"label": "PostgreSQL\n(Metadata DB)", "description": "Relational database for all metadata"},
         'SessionManagerService': {"label": "Session Manager", "description": "Manages experiment and session lifecycles"},
@@ -137,16 +143,18 @@ def main():
             exchange_id = to_id(exchange_name, COMPONENTS_META)
             if exchange_id:
                 discovered_ids.add(exchange_id)
-                node_descriptions[exchange_id] = fanout_data.get('description', COMPONENTS_META[exchange_id].get('description'))
-                for item in fanout_data.get('outputs', []):
-                    target_id = to_id(item, COMPONENTS_META)
-                    if target_id:
-                        discovered_ids.add(target_id)
-                        conn_key = (exchange_id, target_id)
-                        connections[conn_key] = {
-                            "label": "AMQP Message",
-                            "tooltip": "Fanout distribution"
-                        }
+                node_descriptions[exchange_id] = fanout_data.get('description', COMPONENTS_META.get(exchange_id, {}).get('description'))
+                outputs_list = fanout_data.get('outputs', [])
+                if outputs_list:
+                    for item in outputs_list:
+                        target_id = to_id(item, COMPONENTS_META)
+                        if target_id:
+                            discovered_ids.add(target_id)
+                            conn_key = (exchange_id, target_id)
+                            connections[conn_key] = {
+                                "label": "AMQP Message",
+                                "tooltip": "Fanout distribution"
+                            }
             continue
 
         if 'service_name' not in data:
@@ -155,34 +163,70 @@ def main():
         service_id = to_id(data['service_name'], COMPONENTS_META)
         if service_id:
             discovered_ids.add(service_id)
-            node_descriptions[service_id] = data.get('description', COMPONENTS_META[service_id].get('description'))
+            node_descriptions[service_id] = data.get('description', COMPONENTS_META.get(service_id, {}).get('description'))
 
-        for item in data.get('inputs', []):
-            source_id = to_id(item.get('source'), COMPONENTS_META)
-            if source_id and service_id:
-                discovered_ids.add(source_id)
-                conn_key = (source_id, service_id)
-                connections[conn_key] = {
-                    "label": item.get('data_format', ''),
-                    "tooltip": f"Schema: {item.get('schema', 'N/A')}"
-                }
+        inputs_list = data.get('inputs')
+        if inputs_list:
+            for item in inputs_list:
+                source_id = to_id(item.get('source'), COMPONENTS_META)
+                if source_id and service_id:
+                    discovered_ids.add(source_id)
+                    conn_key = (source_id, service_id)
 
-        for item in data.get('outputs', []):
-            target_id = to_id(item.get('target'), COMPONENTS_META)
-            if service_id and target_id:
-                discovered_ids.add(target_id)
-                conn_key = (service_id, target_id)
-                if conn_key not in connections:
+                    # --- MODIFICATION: Combine data_format and schema for the edge label ---
+                    label_parts = []
+                    data_format = item.get('data_format')
+                    schema = item.get('schema')
+                    if data_format:
+                        label_parts.append(data_format)
+                    if schema:
+                        label_parts.append(schema)
+                    
                     connections[conn_key] = {
-                        "label": item.get('data_format', ''),
+                        "label": "\n".join(label_parts),
                         "tooltip": f"Schema: {item.get('schema', 'N/A')}"
                     }
+                    # --- END MODIFICATION ---
+
+        outputs_list = data.get('outputs')
+        if outputs_list:
+            for item in outputs_list:
+                target_id = to_id(item.get('target'), COMPONENTS_META)
+                if service_id and target_id:
+                    discovered_ids.add(target_id)
+                    conn_key = (service_id, target_id)
+                    if conn_key not in connections:
+                        # --- MODIFICATION: Combine data_format and schema for the edge label ---
+                        label_parts = []
+                        data_format = item.get('data_format')
+                        schema = item.get('schema')
+                        if data_format:
+                            label_parts.append(data_format)
+                        if schema:
+                            label_parts.append(schema)
+
+                        connections[conn_key] = {
+                            "label": "\n".join(label_parts),
+                            "tooltip": f"Schema: {item.get('schema', 'N/A')}"
+                        }
+                        # --- END MODIFICATION ---
 
     # Graphvizオブジェクトの作成
     dot = Digraph(comment='Data Flow Diagram')
-    # --- 修正点1: ranksepを増やしてノード間の間隔を調整 ---
-    dot.attr(rankdir='LR', splines='ortho', nodesep='0.8', ranksep='2.0', label='Interactive Data Flow Diagram', labelloc='t', fontsize='20')
-    dot.attr('node', shape='box', style='rounded,filled', fontname='Arial', fontsize='12')
+    
+    dot.attr(
+        rankdir='LR', 
+        splines='ortho',
+        nodesep='1.5',
+        ranksep='3.5',
+        label='Interactive Data Flow Diagram', 
+        labelloc='t', 
+        fontsize='20',
+        overlap='scale',
+        sep='+25'
+    )
+    
+    dot.attr('node', shape='box', style='rounded,filled', fontname='Arial', fontsize='12', width='2.5', height='1.2', fixedsize='true')
     dot.attr('edge', fontname='Arial', fontsize='10')
 
     # サブグラフ(クラスター)とノードの定義
@@ -193,9 +237,6 @@ def main():
 
         with dot.subgraph(name=f'cluster_{i}') as c:
             c.attr(label=subgraph_name, style='rounded,filled', color='#eeeeee', fontcolor='black', fontsize='16')
-            # --- 修正点2: サブグラフ内のrankdir指定を削除し、レイアウト方向を 'LR' に統一 ---
-            # if subgraph_name in ["API & Data Ingestion", "Backend Processing", "Storage Layer", "Management & Export"]:
-            #     c.attr(rankdir='TB')
 
             for member_id in drawable_members:
                 if member_id in COMPONENTS_META:
@@ -206,16 +247,15 @@ def main():
                     elif 'Queue' in meta['label'] or 'Exchange' in meta['label']:
                         fillcolor = '#fff3cd'
                     elif 'External' in subgraph_name:
-                         fillcolor = '#e3f2fd'
+                        fillcolor = '#e3f2fd'
                     elif 'Mobile' in subgraph_name:
-                         fillcolor = '#e8f5e9'
+                        fillcolor = '#e8f5e9'
 
                     node_tooltip = node_descriptions.get(member_id, meta.get('description', 'No description available.'))
                     c.node(member_id, label=meta['label'], fillcolor=fillcolor, tooltip=node_tooltip)
 
     # 接続とツールチップの描画
     for (source, target), details in connections.items():
-        # --- 修正点3: 'label' を 'xlabel' に変更し、'ortho' スプラインとの互換性を確保 ---
         dot.edge(source, target, xlabel=details.get('label'), tooltip=details.get('tooltip'), labelfontsize='9')
 
     # SVGファイルの生成

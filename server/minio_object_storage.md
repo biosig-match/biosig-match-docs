@@ -4,13 +4,10 @@ description: "全ての生データ（EEG/IMU, 画像, 音声など）を格納�
 inputs:
   - source: "Processorサービス"
     data_format: "Zstandard圧縮されたバイナリ"
-    schema: "EEG/IMUデータ"
-  - source: "スマートフォンアプリ"
-    data_format: "画像/音声ファイル"
-    schema: "JPEG, WAVなど"
+    schema: "EEG/IMUデータ, JPEG, WAVなど"
 outputs:
   - target: "BIDS Exporterサービス"
-    data_format: "同上"
+    data_format: "Zstandard圧縮されたバイナリ"
     schema: "リクエストに応じてオブジェクトを読み出し"
 ---
 
@@ -22,8 +19,7 @@ MinIO は、本システムにおける一次データ（raw data）の格納庫
 
 - **役割**: **「変更されない大容量データの効率的な保管」**。
 - **格納データ**:
-  - `Processor`によって整形・圧縮された EEG/IMU データ
-  - スマートフォンからアップロードされた画像、音声ファイル
+  - `Processor`によって整形・圧縮された EEG/IMU データ、画像、音声ファイル
 - **命名規則（ディレクトリ構造）**:
   - **目的**: パス自体がメタデータとして機能し、効率的な検索を可能にするため。
   - **EEG/IMU**: `eeg/{user_id}/start_ms={start_unix_ms}/end_ms={end_unix_ms}_{uuid}.zst`
