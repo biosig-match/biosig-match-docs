@@ -36,16 +36,35 @@ PostgreSQL は、本システムにおける**「信頼できる唯一の情報�
 - **主なテーブルスキーマ**:
 
   - **`experiments` テーブル**:
-  - `experiment_id` (UUID, PK): サーバーが発行する一意な実験 ID。 - `name` (VARCHAR): 実験名。 - `description` (TEXT): 実験の詳細。 - `created_at` (TIMESTAMPTZ): 作成日時。
-  - **`sessions` テーブル**: - `session_id` (VARCHAR, PK): クライアントが生成する一意なセッション ID (`user-start-end`)。 - `user_id` (VARCHAR): セッションを実行したユーザーの ID。 - `experiment_id` (UUID, FK to experiments): このセッションが属する実験の ID。 - `start_time` (TIMESTAMPTZ): セッション開始時刻(UTC)。 - `end_time` (TIMESTAMPTZ): セッション終了時刻(UTC)。 - `session_type` (VARCHAR): 'calibration' または 'main'。 - `calibration_for_session_id` (VARCHAR, FK to sessions): このセッションがキャリブレーションである場合、対象となる本実験セッションの ID。 - `link_status` (VARCHAR): データ紐付けジョブの状況 ('pending', 'processing', 'completed', 'failed')。
+
+    - `experiment_id` (UUID, PK): サーバーが発行する一意な実験 ID。
+    - `name` (VARCHAR): 実験名。
+    - `description` (TEXT): 実験の詳細。
+    - `created_at` (TIMESTAMPTZ): 作成日時。
+
+  - **`sessions` テーブル**:
+
+    - `session_id` (VARCHAR, PK): クライアントが生成する一意なセッション ID (`user-start-end`)。
+    - `user_id` (VARCHAR): セッションを実行したユーザーの ID。
+    - `experiment_id` (UUID, FK to experiments): このセッションが属する実験の ID。
+    - `device_id` (VARCHAR): セッションで使用されたデバイスの ID。
+    - `start_time` (TIMESTAMPTZ): セッション開始時刻(UTC)。
+    - `end_time` (TIMESTAMPTZ): セッション終了時刻(UTC)。
+    - `session_type` (VARCHAR): 'calibration' または 'main'。
+    - `calibration_for_session_id` (VARCHAR, FK to sessions): このセッションがキャリブレーションである場合、対象となる本実験セッションの ID。
+    - `link_status` (VARCHAR): データ紐付けジョブの状況 ('pending', 'processing', 'completed', 'failed')。
+
   - **`raw_data_objects` テーブル**: - `object_id` (VARCHAR, PK): MinIO に格納されたオブジェクトの完全なキー。 - `user_id` (VARCHAR): このデータを生成したユーザーの ID。 - `session_id` (VARCHAR, FK to sessions, NULLABLE): データが属するセッションの ID。最初は NULL で、DataLinker によって更新される。 - `start_time` (TIMESTAMPTZ): このデータチャンクの開始時刻(UTC)。 - `end_time` (TIMESTAMPTZ): このデータチャンクの終了時刻(UTC)。 - `data_type` (VARCHAR): データの種類 ('eeg', 'imu', 'jpeg'など)。 - `created_at` (TIMESTAMPTZ): このレコードの作成日時。
+
   - **`images` テーブル (新規)**:
+
     - `object_id` (VARCHAR, PK): MinIO に格納された画像オブジェクトのキー。
     - `user_id` (VARCHAR): ユーザー ID。
     - `session_id` (VARCHAR, FK to sessions): セッション ID。
     - `experiment_id` (UUID, FK to experiments, NULLABLE): データ紐付け後に更新される実験 ID。
     - `timestamp_utc` (TIMESTAMPTZ): 撮影時刻(UTC)。
     - `created_at` (TIMESTAMPTZ): レコード作成日時。
+
   - **`audio_clips` テーブル (新規)**:
     - `object_id` (VARCHAR, PK): MinIO に格納された音声オブジェクトのキー。
     - `user_id` (VARCHAR): ユーザー ID。

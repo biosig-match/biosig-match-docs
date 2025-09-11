@@ -33,7 +33,8 @@ outputs:
   - `GET /api/v1/experiments`: 参加可能な既存の実験リストを取得。
   - `POST /api/v1/sessions/end`: セッション終了時にスマホアプリから呼び出される。**セッション情報とイベント CSV をまとめて受け付ける。**
     - **Request Body (Multipart/form-data)**:
-      - `metadata` (part): セッション情報を含む JSON 文字列 (`{ session_id, user_id, experiment_id, start_time, end_time, session_type }`)
+      - `metadata` (part): セッション情報を含む JSON 文字列 (**`device_id`を含む**)。
+        - **JSON Schema**: `{ "session_id": "...", "user_id": "...", "experiment_id": "...", "device_id": "...", "start_time": "...", "end_time": "...", "session_type": "..." }`
       - `events_file` (part, optional): イベント情報を含む CSV ファイル。
     - **処理**: 受け取った情報で`sessions`テーブル等を更新し、データ紐付けジョブを投入する。
 
