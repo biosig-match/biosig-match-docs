@@ -3,25 +3,25 @@ service_name: "DataLinker Service"
 description: "セッション終了後に起動し、記録された生データとセッション情報を紐付ける非同期バックエンドサービス。メディアデータのタイムスタンプ正規化も担う。"
 
 inputs:
-  - source: "Session Manager Service (via Async Task Queue)"
-    data_format: "Job Payload (JSON)"
-    schema: |
-      {
-        "session_id": "user-abcdef-1726000000000",
-        "user_id": "user-abcdef",
-        "experiment_id": "uuid-for-experiment",
-        "session_start_utc": "2025-09-15T10:00:00Z",
-        "session_end_utc": "2025-09-15T10:30:00Z",
-        "clock_offset_info": { ... }
-      }
-  - source: "PostgreSQL"
-    data_format: "SQL SELECT"
-    schema: "`raw_data_objects`, `images`, `audio_clips` テーブルから、指定された`user_id`と時間範囲に合致するレコードを検索"
+  - source: "Session Manager Service (via Async Task Queue)"
+    data_format: "Job Payload (JSON)"
+    schema: |
+      {
+        "session_id": "user-abcdef-1726000000000",
+        "user_id": "user-abcdef",
+        "experiment_id": "uuid-for-experiment",
+        "session_start_utc": "2025-09-15T10:00:00Z",
+        "session_end_utc": "2025-09-15T10:30:00Z",
+        "clock_offset_info": { ... }
+      }
+  - source: "PostgreSQL"
+    data_format: "SQL SELECT"
+    schema: "`raw_data_objects`, `images`, `audio_clips` テーブルから、指定された`user_id`と時間範囲に合致するレコードを検索"
 
 outputs:
-  - target: "PostgreSQL"
-    data_format: "SQL INSERT/UPDATE"
-    schema: "`session_object_links`テーブルへのINSERT、`images`と`audio_clips`のタイムスタンプ正規化と`experiment_id`のUPDATE"
+  - target: "PostgreSQL"
+    data_format: "SQL INSERT/UPDATE"
+    schema: "`session_object_links`テーブルへのINSERT、`images`と`audio_clips`のタイムスタンプ正規化と`experiment_id`のUPDATE"
 ---
 
 ## 概要

@@ -1,6 +1,6 @@
 # MyProject ドキュメントリポジトリ
 
-このリポジトリは、MyProjectに関連するすべての設計・仕様ドキュメントを一元管理します。
+このリポジトリは、MyProject に関連するすべての設計・仕様ドキュメントを一元管理します。
 
 ## ✍️ ドキュメントの書き方
 
@@ -32,7 +32,7 @@ outputs:
 
 ### ✨ データフロー図の自動生成
 
-上記のルールに従って各`.md`ファイルを記述すると、リポジトリにpushした際に**GitHub Actionsが自動で[データフロー図 (`architecture/02_data-flow.md`)](architecture/02_data-flow.md)を更新します。**
+上記のルールに従って各`.md`ファイルを記述すると、リポジトリに push した際に**GitHub Actions が自動で[データフロー図 (`architecture/02_data-flow.md`)](architecture/02_data-flow.md)を更新します。**
 
 手動で図を編集する必要はありません。
 
@@ -41,7 +41,7 @@ outputs:
 - **`/architecture`**: システム全体のアーキテクチャ、設計思想、データフロー図。
 - **`/hardware`**: 筐体や電子回路に関する設計資料。
 - **`/firmware`**: マイコンのファームウェアに関する仕様書。
-- **`/mobile`**: Flutter製モバイルアプリの仕様書。
+- **`/mobile`**: Flutter 製モバイルアプリの仕様書。
 - **`/server`**: サーバーサイドの各サービス、データベースに関する仕様書。
 - **`/scripts`**: ドキュメント自動化のためのスクリプト。
 - **`/_templates`**: ドキュメントのテンプレート。
