@@ -3,39 +3,39 @@ service_name: "Collector Service"
 description: "全生データ（センサー、画像、音声）の受信を一手に引き受ける、スケーラブルな API ゲートウェイ。"
 
 inputs:
-  - source: "スマートフォンアプリ"
-    data_format: "HTTP POST (JSON)"
-    schema: "エンドポイント `/api/v1/data`: { user_id, payload_base64 }"
-  - source: "スマートフォンアプリ"
-    data_format: "HTTP POST (Multipart/form-data)"
-    schema: |
-      エンドポイント `/api/v1/media`: フォームパートにメディアファイルとメタデータを含む
-      - file: (バイナリデータ)
-      - user_id: (VARCHAR)
-      - session_id: (VARCHAR)
-      - mimetype: (VARCHAR) 例: 'image/jpeg', 'audio/m4a'
-      - original_filename: (VARCHAR)
-      - timestamp_utc: (ISO8601 String, 画像用)
-      - start_time_utc: (ISO8601 String, 音声用)
-      - end_time_utc: (ISO8601 String, 音声用)
+  - source: "スマートフォンアプリ"
+    data_format: "HTTP POST (JSON)"
+    schema: "エンドポイント `/api/v1/data`: { user_id, payload_base64 }"
+  - source: "スマートフォンアプリ"
+    data_format: "HTTP POST (Multipart/form-data)"
+    schema: |
+      エンドポイント `/api/v1/media`: フォームパートにメディアファイルとメタデータを含む
+      - file: (バイナリデータ)
+      - user_id: (VARCHAR)
+      - session_id: (VARCHAR)
+      - mimetype: (VARCHAR) 例: 'image/jpeg', 'audio/m4a'
+      - original_filename: (VARCHAR)
+      - timestamp_utc: (ISO8601 String, 画像用)
+      - start_time_utc: (ISO8601 String, 音声用)
+      - end_time_utc: (ISO8601 String, 音声用)
 
 outputs:
-  - target: "RabbitMQ (Fanout Exchange: raw_data_exchange)"
-    data_format: "AMQP Message"
-    schema: "Body: バイナリデータ, Headers: { user_id }"
-  - target: "RabbitMQ (Queue: media_processing_queue)"
-    data_format: "AMQP Message"
-    schema: |
-      Body: メディアファイル(バイナリ)
-      Headers: {
-        user_id,
-        session_id,
-        mimetype,
-        original_filename,
-        timestamp_utc,
-        start_time_utc,
-        end_time_utc
-      }
+  - target: "RabbitMQ (Fanout Exchange: raw_data_exchange)"
+    data_format: "AMQP Message"
+    schema: "Body: バイナリデータ, Headers: { user_id }"
+  - target: "RabbitMQ (Queue: media_processing_queue)"
+    data_format: "AMQP Message"
+    schema: |
+      Body: メディアファイル(バイナリ)
+      Headers: {
+        user_id,
+        session_id,
+        mimetype,
+        original_filename,
+        timestamp_utc,
+        start_time_utc,
+        end_time_utc
+      }
 ---
 
 ## 概要
