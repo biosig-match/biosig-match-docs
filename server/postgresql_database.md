@@ -83,7 +83,40 @@ PostgreSQL は、本システムにおける全ての構造化されたメタデ
 | `description` | TEXT | このイベントインスタンス固有の説明 |
 | `value` | VARCHAR(255) | その他記録したい値 |
 
-(raw_data_objects, session_object_links, images, audio_clips テーブルは変更なし)
+### `raw_data_objects` テーブル
+
+MinIO に保存された**圧縮済み**センサーデータ（EEG/IMU 混合）のメタデータを管理します。
+| カラム名 | 型 | 制約 / 説明 |
+|:---|:---|:---|
+| `object_id` | VARCHAR(512) | **PK**, MinIO のオブジェクトキー |
+| `user_id` | VARCHAR(255) | NOT NULL, ユーザー ID |
+| `device_id` | VARCHAR(255) | データパケットに含まれるデバイス ID |
+| `start_time` | TIMESTAMPTZ | NOT NULL, データチャンクの開始時刻(UTC) |
+| `end_time` | TIMESTAMPTZ | NOT NULL, データチャンクの終了時刻(UTC) |
+| `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW(), レコード作成日時 |
+
+### `session_object_links` テーブル
+
+`DataLinker`サービスによって、セッションとセンサーデータオブジェクトを紐付けるための中間テーブルです。
+| カラム名 | 型 | 制約 / 説明 |
+|:---|:---|:---|
+| `session_id` | VARCHAR(255) | **PK**, _FK to sessions_ |
+| `object_id` | VARCHAR(512) | **PK**, _FK to raw_data_objects_ |
+
+### `images` / `audio_clips` テーブル
+
+MinIO に保存されたメディアファイルのメタデータを管理します。
+
+| カラム名 | 型 | 制約 / 説明 |
+|:---|:---|:---|
+| `object_id` | VARCHAR(512) | **PK**, MinIO のオブジェクトキー |
+| `user_id` | VARCHAR(255) | NOT NULL, ユーザー ID |
+| `session_id` | VARCHAR(255) | **外部キー制約なし**。下記「設計思想」参照 |
+| `experiment_id` | UUID | _FK to experiments_, `DataLinker`によって後から紐付け |
+| `timestamp_utc` | TIMESTAMPTZ | NOT NULL, **(images のみ)** 撮影時刻 |
+| `start_time` | TIMESTAMPTZ | NOT NULL, **(audio_clips のみ)** 録音開始時刻 |
+| `end_time` | TIMESTAMPTZ | NOT NULL, **(audio_clips のみ)** 録音終了時刻 |
+| `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW(), レコード作成日時 |
 
 ## 設計思想とデータ関連付け戦略
 
