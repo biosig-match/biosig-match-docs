@@ -20,21 +20,27 @@ outputs:
   - target: "Async Task Queue (DataLinker)"
     data_format: "Job"
     schema: "データ紐付け処理のタスク"
+  - target: "Auth Manager Service"
+    data_format: "HTTP GET (Internal API Call)"
+    schema: "**(NEW)** 権限確認リクエスト"
+    
 ---
 
 ## 概要
 
-`Session Manager`は、実験の「設計」から「実施」、「記録」までのライフサイクル全体を管理する司令塔です。ユーザーはまず実験を作成し、**その実験で使用する全ての刺激アセット（イベントリストCSVと画像ファイル群）を本サービスに登録します（実験の「計画」）。** この実験の参加者は、登録されたイベントリストCSVと画像ファイル群をもとに erp 検出タスクを行うことになります。セッション終了時には、どの刺激がいつ提示されたかという実行結果（「実績」）を受け取り、DBを更新すると共に、後続のデータ紐付けジョブを起動します。
+`Session Manager`は、実験の「設計」から「実施」、「記録」までのライフサイクル全体を管理する司令塔です。ユーザーはまず実験を作成し、その実験で使用する全ての刺激アセット（イベントリストCSVと画像ファイル群）を本サービスに登録します（実験の「計画」）。 この実験の参加者は、登録されたイベントリストCSVと画像ファイル群をもとに erp 検出タスクを行うことになります。セッション終了時には、どの刺激がいつ提示されたかという実行結果（「実績」）を受け取り、DBを更新すると共に、後続のデータ紐付けジョブを起動します。何らかの操作を行う前には、必ず`Auth Manager`サービスに権限の有無を問い合わせます。
 
 ## 詳細
 
-- **責務**: **「実験という『意味』の定義と、それに紐づくアセットの管理」**、および**「実行されたセッション結果の記録」**。
+* **責務**:
+    * 「実験の定義と、それに紐づくアセット（刺激ファイル等）の管理」
+    * 「実行されたセッションのライフサイクル（開始・終了）の管理と、その結果の記録」
 
 - **API エンドポイント**:
-
+ -`POST /api/v1/sessions/start`: セッション開始時に呼び出されるAPI。`sessions`テーブルにレコードを先行して作成し、システムが「実行中のセッション」を把握できるようにする。
   - `POST /api/v1/experiments`: 新規実験を作成。
   - `GET /api/v1/experiments`: 既存の実験リストを取得。
-  - `POST /api/v1/experiments/{experiment_id}/stimuli`: 実験の「計画」を登録する最重要エンドポイント。
+  - `POST /api/v1/experiments/{experiment_id}/stimuli`: 実験の計画を登録するエンドポイント。刺激ファイルの永続化処理は後段のワーカサービスの非同期キューにファイル永続化ジョブを投入する実装が望ましい。
     - **用途**: 実験設計時に使用。
     - **Request Body (Multipart/form-data)**:
       - `stimuli_definition_csv` (part): 刺激の定義ファイル。アプリでは UI で刺激の提示順を決定できるため、決定された刺激順をアプリ内でcsvファイルとして生成する。全実験参加者に強制したい刺激の提示順があればこれによって決定する。提示順決定時にランダムな提示順が選択された場合、このファイルは順番の意味を持たず、単なる提示ファイルリストとして DB に登録される。
@@ -49,15 +55,19 @@ outputs:
       5. **DB登録**: CSVの各行について、`experiment_id`や取得した`object_id`を`experiment_stimuli`テーブルに`INSERT`する。
       6. **トランザクション完了**。
 
-  - **`POST /api/v1/sessions/end` (UPDATED)**: **セッションの「実績」を登録するエンドポイント。**
+  - `POST /api/v1/sessions/end`: セッションの「実績」を登録するエンドポイント。リクエストを受け付けると、該当の`session_id`に紐づく既存のイベントログ (`session_events`テーブルのレコード) を一度すべて削除してから、新しいログを登録する（**DELETE & INSERT**）。これにより、ユーザーは誤ったログを安全に修正・再アップロードできる。
     - **用途**: 全てのセッションタイプ（All-in-One, Hybrid）の終了時に呼び出される。
     - **Request Body (Multipart/form-data)**:
       - `metadata` (part): セッション情報を含むJSON文字列。
       - `events_log_csv` (part, optional): イベント実績ログ。
-        - **CSV Schema (例)**: `trial_type,file_name,description,onset(optional),duration(optional)`
+        - CSV Schema: 
+`trial_type,file_name,description,onset(optional),duration(optional)`
         - PsychoPy のイベントリストの csv スキーマに忠実に合わせる。
         - **備考**: PsychoPy等と連携する「Hybridモード」では必須。アプリ完結の「All-in-Oneモード」ではアプリが内部生成して送信。
     - **処理**:
       1. `metadata`で`sessions`テーブルを更新。
       2. `events_log_csv`が存在すればパースし、各行を`session_events`テーブルに`INSERT`する。
       3. データ紐付けジョブを`DataLinker`のために非同期タスクキューに投入する。
+
+* **今後の拡張**:
+    * **ライフサイクル管理**: 実験内容の `更新 (PUT)` や `削除 (DELETE)` を行うためのAPIエンドポイントの実装が将来的に必要となる。
