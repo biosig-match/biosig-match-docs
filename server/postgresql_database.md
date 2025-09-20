@@ -31,6 +31,8 @@ PostgreSQL は、本システムにおける全ての構造化されたメタデ
 
 ## スキーマ詳細
 
+#### スキーマ詳細
+
 ### `experiments` テーブル
 
 実験の基本情報を管理します。
@@ -39,7 +41,7 @@ PostgreSQL は、本システムにおける全ての構造化されたメタデ
 | `experiment_id` | UUID | **PK**, サーバーが発行する一意な実験 ID |
 | `name` | VARCHAR(255) | NOT NULL, 実験名 |
 | `description` | TEXT | 実験の詳細 |
-| `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW(), 作成日時 |
+| `password_hash` | VARCHAR(255) | 参加用パスワードのハッシュ値 |
 
 ### `sessions` テーブル
 
@@ -55,19 +57,30 @@ PostgreSQL は、本システムにおける全ての構造化されたメタデ
 | `session_type` | VARCHAR(50) | 'calibration', 'main_integrated' (アプリ内蔵), 'main_external' (外部連携) など |
 | `link_status` | VARCHAR(50) | NOT NULL, DEFAULT 'pending', `DataLinker`の状態 |
 
-### `experiment_stimuli` テーブル (NEW)
+### `experiment_participants` テーブル
+
+実験への参加者とその役割（ロール）を管理する、権限モデルの核となるテーブルです。
+| カラム名 | 型 | 制約 / 説明 |
+|:---|:---|:---|
+| `experiment_id` | UUID | **PK**, _FK to experiments_ |
+| `user_id` | VARCHAR(255) | **PK**, ユーザーID |
+| `role` | VARCHAR(50) | NOT NULL, 'owner', 'participant' など |
+| `joined_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW(), 参加日時 |
+
+### `experiment_stimuli` テーブル
 
 実験の**「設計（Plan）」**を管理します。実験で使用される可能性のある全ての刺激アセット（画像等）を事前に定義します。
 | カラム名 | 型 | 制約 / 説明 |
 |:---|:---|:---|
-| `stimulus_id` | BIGSERIAL | **PK**, 刺激のシステム内ユニークID |
+| `stimulus_id` | BIGSERIAL | **PK** |
 | `experiment_id` | UUID | NOT NULL, _FK to experiments_ |
-| `stimulus_name` | VARCHAR(255) | NOT NULL, イベントリストで使われる刺激名 (例: 'image_895.jpg') |
+| `file_name` | VARCHAR(255) | NOT NULL, *イベントリストで使われるファイル名 |
 | `stimulus_type` | VARCHAR(50) | NOT NULL, 'image', 'audio'など |
-| `trial_type` | VARCHAR(255) | 実験条件を示すラベル (例: 'target', 'nontarget') |
+| `trial_type` | VARCHAR(255) | 実験条件を示すラベル (例: 'target', 'nontarget')  |
 | `description` | TEXT | この個別の刺激に対する説明 |
 | `object_id` | VARCHAR(512) | MinIOに保存された刺激ファイル本体への参照キー |
-| `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() |
+| UNIQUE (`experiment_id`, `file_name`) | | |
+
 
 ### `session_events` テーブル (NEW)
 
@@ -93,7 +106,6 @@ MinIO に保存された**圧縮済み**センサーデータ（EEG/IMU 混合�
 | `device_id` | VARCHAR(255) | データパケットに含まれるデバイス ID |
 | `start_time` | TIMESTAMPTZ | NOT NULL, データチャンクの開始時刻(UTC) |
 | `end_time` | TIMESTAMPTZ | NOT NULL, データチャンクの終了時刻(UTC) |
-| `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW(), レコード作成日時 |
 
 ### `session_object_links` テーブル
 
@@ -116,7 +128,6 @@ MinIO に保存されたメディアファイルのメタデータを管理し�
 | `timestamp_utc` | TIMESTAMPTZ | NOT NULL, **(images のみ)** 撮影時刻 |
 | `start_time` | TIMESTAMPTZ | NOT NULL, **(audio_clips のみ)** 録音開始時刻 |
 | `end_time` | TIMESTAMPTZ | NOT NULL, **(audio_clips のみ)** 録音終了時刻 |
-| `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW(), レコード作成日時 |
 
 ## 設計思想とデータ関連付け戦略
 
