@@ -82,7 +82,7 @@ PostgreSQL は、本システムにおける全ての構造化されたメタデ
 | UNIQUE (`experiment_id`, `file_name`) | | |
 
 
-### `session_events` テーブル (NEW)
+### `session_events` テーブル
 
 セッションの**「実績（Log）」**を管理します。セッション中に実際に提示されたイベントのタイムスタンプ情報を記録します。
 | カラム名 | 型 | 制約 / 説明 |
@@ -90,8 +90,8 @@ PostgreSQL は、本システムにおける全ての構造化されたメタデ
 | `event_id` | BIGSERIAL | **PK**, このイベントログの一意なID |
 | `session_id` | VARCHAR(255) | NOT NULL, _FK to sessions_ |
 | `stimulus_id` | BIGINT | _FK to experiment_stimuli_, どの定義済み刺激が使われたか（NULL許容） |
-| `onset_s` | DOUBLE PRECISION | NOT NULL, セッション開始からのイベント発生時刻(秒) |
-| `duration_s` | DOUBLE PRECISION | NOT NULL, イベントの継続時間(秒) |
+| `onset` | DOUBLE PRECISION | NOT NULL, セッション開始からのイベント発生時刻(ms) |
+| `duration` | DOUBLE PRECISION | NOT NULL, イベントの継続時間(ms) |
 | `trial_type`| VARCHAR(255) | このイベントインスタンスの実験条件 |
 | `description` | TEXT | このイベントインスタンス固有の説明 |
 | `value` | VARCHAR(255) | その他記録したい値 |
