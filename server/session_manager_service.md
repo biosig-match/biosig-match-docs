@@ -59,6 +59,7 @@ outputs:
     - **用途**: 全てのセッションタイプ（All-in-One, Hybrid）の終了時に呼び出される。
     - **Request Body (Multipart/form-data)**:
       - `metadata` (part): セッション情報を含むJSON文字列。
+        - `clock_offset_info`はスマートフォンアプリとファームウェア間の時刻同期結果であり、後段の`DataLinker`サービスがセンサーデータのタイムスタンプをUTCへ正確に補正するために使用されます。
       - `events_log_csv` (part, optional): イベント実績ログ。
         - CSV Schema: 
 `trial_type,file_name,description,onset(optional),duration(optional)`
@@ -69,5 +70,25 @@ outputs:
       2. `events_log_csv`が存在すればパースし、各行を`session_events`テーブルに`INSERT`する。
       3. データ紐付けジョブを`DataLinker`のために非同期タスクキューに投入する。
 
+**metadata Schema (例)**:
+```json
+{
+  "session_id": "...",
+  "user_id": "...",
+  "experiment_id": "...",
+  "device_id": "...",
+  "start_time": "...",
+  "end_time": "...",
+  "session_type": "...",
+  "clock_offset_info": {
+    "offset_ms_avg": -150.5,
+    "rtt_ms_avg": 45.2
+  }
+}
+```
+
 * **今後の拡張**:
     * **ライフサイクル管理**: 実験内容の `更新 (PUT)` や `削除 (DELETE)` を行うためのAPIエンドポイントの実装が将来的に必要となる。
+
+
+
