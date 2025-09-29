@@ -147,6 +147,17 @@ MinIO に保存されたメディアファイルのメタデータを管理し�
 | `start_time` | TIMESTAMPTZ | NOT NULL, **(audio_clips のみ)** 録音開始時刻 |
 | `end_time` | TIMESTAMPTZ | NOT NULL, **(audio_clips のみ)** 録音終了時刻 |
 
+### `erp_analysis_results` テーブル**
+| カラム名 | 型 | 制約 / 説明 |
+|:---|:---|:---|
+| `analysis_id` | BIGSERIAL | **PK**, 解析ジョブの一意なID |
+| `experiment_id` | UUID | **FK to experiments**, NOT NULL |
+| `requested_by_user_id` | VARCHAR(255) | NOT NULL, 解析をリクエストしたユーザー |
+| `status` | VARCHAR(50) | 'processing', 'completed', 'failed' |
+| `result_data` | JSONB | 解析結果のJSONオブジェクト |
+| `created_at` | TIMESTAMPTZ | ジョブ作成日時 |
+| `completed_at` | TIMESTAMPTZ | ジョブ完了日時 |
+
 ## 設計思想とデータ関連付け戦略
 
 1.  **「計画」と「実績」の分離**:
