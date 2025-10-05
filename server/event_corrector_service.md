@@ -3,28 +3,70 @@ service_name: "Event Corrector Service"
 description: "生データ内の高精度トリガ信号とイベントログを照合し、ERP解析に不可欠なマイクロ秒精度のイベント時刻を算出する、計算集約型の非同期バックエンドサービス。"
 
 inputs:
-  - source: "DataLinker Service (via RabbitMQ: event_correction_queue)"
+  - source: "Any authorized service (typically DataLinker via RabbitMQ: event_correction_queue)"
     data_format: "AMQP Message (JSON)"
     schema: |
       {
-        "session_id": "user-abcdef-1726000000000"
+        "session_id": "uuid-v4-string"
       }
   - source: "PostgreSQL"
     data_format: "SQL SELECT"
-    schema: "指定された`session_id`に紐づく`session_events`および`session_object_links`の全レコード"
+    schema: "指定された`session_id`に紐づく`sessions`（特に`clock_offset_info`）、`session_events`、`session_object_links`のレコード"
   - source: "MinIO"
     data_format: "Object GET"
-    schema: "`session_object_links`経由で特定された、セッションに対応する圧縮済み生データオブジェクト群"
+    schema: "`session_object_links`経由で特定された、セッションに対応する生データオブジェクト群（zstd圧縮または非圧縮）"
 
 outputs:
   - target: "PostgreSQL"
-    data_format: "SQL UPDATE"
-    schema: "`session_events`テーブルの`onset_corrected_us`カラムへの書き込み、および`sessions`テーブルの`event_correction_status`の更新"
+    data_format: "SQL UPDATE (within a transaction)"
+    schema: "`session_events`テーブルの`onset_corrected_us`カラムへの補正済みタイムスタンプの書き込み、および`sessions`テーブルの`event_correction_status`の更新（`completed` / `failed`）"
 ---
 
 ## 概要
 
 `Event Corrector Service`は、`DataLinker`による基本的なデータ紐付けが完了した後に起動される、専門的なバッチ処理ワーカーです。その唯一の責務は、**PsychoPyなどが出力したイベントログの時刻 (`onset`) を、センサーデータ内に記録されている物理的なトリガ信号の発生時刻（マイクロ秒精度）と照合し、イベントの発生時刻をマイコンの高精度な内部クロックに完全に同期させること**です。
+
+このサービスはシステムのデータ精度を保証する最後の砦であり、特にERP（事象関連電位）のようなミリ秒単位の精度が求められる脳波解析において、不可欠な役割を担います。
+
+---
+
+## スキーマ変更に伴う修正要件
+
+新しいデータスキーマに対応するため、`Event Corrector`の処理フロー、特に**データパースとタイムスタンプ計算のロジックを全面的に書き換える必要があります。**
+
+### 1. データ取得方法の簡素化
+
+- `raw_data_objects`テーブルに`session_id`が直接格納されるようになるため、`session_object_links`テーブルを介したJOINは不要になります。`session_id`をキーに、関連する全ての生データオブジェクトを直接`raw_data_objects`テーブルから取得してください。
+- **注:** このデータ取得方法は、`Processor`サービスのドキュメントで言及されている**データベーススキーマの変更が適用済みであること**を前提としています。
+
+### 2. バイナリパースとトリガー抽出ロジックの全面的な書き換え
+
+- **旧処理:** 固定長（53バイト/点）のフォーマットをパースし、特定オフセットのトリガフラグとタイムスタンプを読み取っていました。
+- **新処理:** このロジックは**完全に廃止**し、新しいデータスキーマ仕様に従って書き換える必要があります。
+  1.  MinIOから取得した生データオブジェクトを、`ヘッダーブロック`とそれに続く`128個のサンプルデータブロック`としてパースします。
+  2.  128個の各サンプルをループ処理します。
+  3.  各サンプル内の`signals`配列（全チャンネルの信号値）をさらにループ処理します。
+  4.  各信号値について、`bit 12`が立っているか (`(value & 0x1000) != 0`) を確認し、立っていれば物理トリガと判断します。
+
+### 3. トリガータイムスタンプの計算方法の変更
+
+新しいバイナリにはサンプルごとのタイムスタンプが含まれていないため、**補間計算によって時刻を算出する**必要があります。
+
+1.  処理対象の`raw_data_objects`レコードから、`timestamp_start_ms`と`timestamp_end_ms`を取得します。
+2.  ブロック全体の期間（ミリ秒）を計算します: `duration_ms = timestamp_end_ms - timestamp_start_ms`。
+3.  1サンプルあたりの時間を計算します: `time_per_sample_ms = duration_ms / 128`。
+4.  トリガーが`i`番目（0-127）のサンプルで検出された場合、そのトリガーのタイムスタンプは以下のように計算されます:
+    `trigger_timestamp_ms = timestamp_start_ms + (i * time_per_sample_ms)`
+
+### 4. 精度に関する注意
+
+- 上記の計算で得られるタイムスタンプは**ミリ秒精度**です。サービスの元々の目的である「マイクロ秒精度」を達成するためには、`timestamp_start_ms`と`timestamp_end_ms`をマイクロ秒単位で扱うか、あるいはサンプリング周波数を別途取得してより正確な補間を行う必要があります。この点については、`Processor`サービスがDBに保存する時刻の精度と合わせて、仕様を再検討する必要があります。
+
+### 5. タイムスタンプフィルタリング処理の廃止
+
+- 旧処理フローのステップ6（`clock_offset_info`を用いたデバイス時間範囲の計算とフィルタリング）は、データ取得が`session_id`ベースに簡素化されるため、不要になります。
+
+---
 
 ## 詳細
 
@@ -32,28 +74,32 @@ outputs:
 
 - **「生データとイベントログのシーケンスを照合し、各イベントの発生時刻を、ネットワーク遅延などの外的要因から完全に独立した、デバイスの内部時間軸へと補正すること」**
 
-このサービスは、システムのデータ精度を保証する最後の砦であり、特にERP（事象関連電位）のようなミリ秒単位の精度が求められる脳波解析において、不可欠な役割を担います。
-
 ### 処理フロー (Processing Flow)
 
-1.  `event_correction_queue`から`session_id`を含むジョブを一つ取り出します。
-2.  対象セッションの`sessions.event_correction_status`を`'processing'`に更新します。
-3.  **データベースからメタデータを収集**:
-    - `session_id`をキーに、`session_events`テーブルから全てのイベント（`trial_type`, `onset`など）のシーケンスを取得します。
-    - `session_object_links`テーブルから、このセッションに関連する全ての生データオブジェクトの`object_id`を取得します。
-4.  **MinIOから生データをダウンロード**:
-    - 取得した`object_id`のリストに基づき、MinIOから全ての圧縮済み生データ（`.zst`ファイル）をダウンロードします。
-5.  **データの解凍とトリガ抽出**:
-    - ダウンロードしたオブジェクトを時系列順に連結し、Zstandardで解凍します。
-    - 解凍後のバイナリデータを`SensorData`構造体に従ってパースし、`trigger`が`1`になっている箇所の**高精度デバイスタイムスタンプ (`timestamp_us`)** のリストを時系列で抽出します。
-6.  **シーケンスマッチング**:
-    - `session_events`のシーケンスと、抽出したトリガのタイムスタンプリストを照合するアルゴリズムを実行します。（例：イベント数とトリガ数が一致するか、イベント間の時間差とトリガ間の時間差のパターンが類似しているか、など）
-7.  **データベースの更新 (トランザクション内)**:
-    - マッチングに成功した場合、各`session_events`レコードに対応するトリガの`timestamp_us`を、新しく設けられた`onset_corrected_us`カラムに`UPDATE`します。
-    - `sessions.event_correction_status`を`'completed'`に更新します。
-8.  エラーが発生した場合はトランザクションを`ROLLBACK`し、ステータスを`'failed'`に更新します。
+処理はデータベースのトランザクション内で実行され、一貫性が保証されます。
 
-### 背景 (Background)
+1.  **ジョブ受信**: `event_correction_queue`から`session_id`を含むジョブメッセージを一つ取り出します。
+2.  **ステータス更新**: 対象セッションの`sessions.event_correction_status`を`'processing'`に更新します。
+3.  **メタデータ収集**: データベースから以下の情報を取得します。
+    -   `sessions`テーブルから対象セッションのレコード。特に、サーバーとデバイス間の平均クロック差が記録された`clock_offset_info` JSONフィールドが必須です。これがない場合、処理は失敗します。
+    -   `session_events`テーブルから、`onset`で昇順にソートされた全てのイベントレコード。
+    -   `session_object_links`と`raw_data_objects`を結合し、デバイスの記録開始時刻 (`start_time_device`) でソートされた、セッションに関連する全ての生データオブジェクトの`object_id`リスト。
+4.  **生データ取得と伸長**: MinIOから`object_id`に基づき、全ての生データオブジェクトをダウンロードします。各オブジェクトは`x-compression`メタデータに基づき、Zstandard (`.zst`) であれば伸長され、非圧縮 (`none`) であればそのままバイナリデータとして扱われます。
+5.  **トリガタイムスタンプ抽出**: 全ての生データバイナリから、物理トリガのタイムスタンプを抽出します。データは以下の固定長フォーマットであると仮定してパースされます。
+    -   ヘッダー: 18バイト
+    -   データポイント: 53バイト/点
+    -   各データポイント内のトリガフラグはオフセット`48`の1バイト (`1`ならトリガ有り)。
+    -   トリガ発生時のデバイスタイムスタンプ（マイクロ秒）はオフセット`49`の4バイト（リトルエンディアン符号なし整数）。
+    抽出された全タイムスタンプは一つのリストにまとめられ、昇順にソートされます。
+6.  **タイムスタンプのフィルタリング**: `sessions`テーブルの`start_time`、`end_time`と`clock_offset_info`を用いて、セッション期間に対応するデバイス時間（マイクロ秒、32ビット）の範囲を計算します。この範囲内にあるトリガタイムスタンプのみを「関連トリガ」として抽出します。
+7.  **イベント数とトリガ数の厳密な検証**: データベースから取得した**イベントの総数**と、ステップ6で抽出した**「関連トリガ」の総数が完全に一致するかを検証します。** 一致しない場合、補正は不可能と判断し、エラーをスローしてトランザクションをロールバックさせ、`sessions.event_correction_status`を`'failed'`に更新します。
+8.  **データベース更新**: 数が一致した場合、`session_events`の各レコード（`onset`順）に対し、対応する「関連トリガ」のタイムスタンプ（時刻順）を`onset_corrected_us`カラムに`UPDATE`します。
+9.  **完了**: 全てのイベントが更新された後、`sessions.event_correction_status`を`'completed'`に更新し、トランザクションをコミットします。
 
-- **データ精度の最大化**: PsychoPyがイベントログに記録する`onset`は、PCのOSやネットワークの遅延（ジッター）の影響を受け、数ミリ秒〜数十ミリ秒の誤差を含む可能性があります。ERP解析においてこの誤差は致命的です。本サービスは、イベントの発生時刻を、誤差要因のないセンサー自身の時間軸にアンカーすることで、この問題を根本的に解決します。
-- **重処理の分離**: MinIOからの大容量ダウンロード、データ解凍、バイナリパースは非常に計算コストの高い処理です。これを`DataLinker`から分離することで、`DataLinker`は軽量なメタデータ操作に集中でき、システム全体の応答性と安定性が向上します。
+### APIエンドポイント
+
+本サービスは主に非同期ワーカーとして動作しますが、ジョブを投入するためのHTTPエンドポイントも提供しています。
+
+-   `POST /api/v1/jobs`
+    -   リクエストボディに `{ "session_id": "..." }` を指定することで、イベント補正ジョブをキューに投入します。
+    -   成功すると、HTTP `202 Accepted` と `{ "status": "queued" }` を返します。

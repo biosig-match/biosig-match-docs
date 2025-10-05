@@ -1,94 +1,121 @@
 ---
 service_name: "Session Manager Service"
-description: "実験のライフサイクル全体を管理するサービス。実験の定義、刺激アセット（画像、イベントリスト）の登録、セッション結果の記録を担う。"
+description: "実験のライフサイクル（定義、セッション管理）と、関連サービスへの処理の委譲を担う司令塔。"
 
 inputs:
-  - source: "Smartphone App"
-    data_format: "HTTP POST/GET (JSON)"
-    schema: "実験作成・一覧取得リクエスト"
-  - source: "Smartphone App"
-    data_format: "HTTP POST (Multipart/form-data)"
-    schema: "エンドポイント `/api/v1/experiments/{experiment_id}/stimuli`: 実験で使用する刺激アセット（イベントリストCSVと全ての画像ファイル）の一括アップロード。"
-  - source: "Smartphone App"
-    data_format: "HTTP POST (Multipart/form-data)"
-    schema: "エンドポイント `/api/v1/sessions/end`: セッション終了通知。JSONパートにセッションメタデータ、ファイルパートに実績イベントログ(CSV)を含む。"
+  - source: "Frontend Client (e.g., Smartphone App)"
+    data_format: "HTTP POST/GET (JSON, Multipart/form-data)"
+    schema: "`/api/v1/experiments`および`/api/v1/sessions`配下のエンドポイント群"
+  - source: "Auth Manager Service (via middleware)"
+    data_format: "Internal HTTP Call"
+    schema: "各エンドポイントの権限（owner/participant）を検証するために内部的に呼び出される。"
 
 outputs:
   - target: "PostgreSQL"
     data_format: "SQL INSERT/UPDATE"
-    schema: "`experiments`, `sessions`, `experiment_stimuli`, `session_events`テーブルへの書き込み"
-  - target: "Async Task Queue (DataLinker)"
-    data_format: "Job"
-    schema: "データ紐付け処理のタスク"
-  - target: "Auth Manager Service"
-    data_format: "HTTP GET (Internal API Call)"
-    schema: "**(NEW)** 権限確認リクエスト"
-    
+    schema: "`experiments`, `sessions`, `experiment_participants`, `session_events`テーブルへの書き込み"
+  - target: "Stimulus Asset Processor Service (via RabbitMQ)"
+    data_format: "AMQP Message (Job Payload)"
+    schema: "刺激アセット（CSVとファイル群）の永続化処理を依頼するジョブ。Queue: `stimulus_asset_queue`"
+  - target: "DataLinker Service (via RabbitMQ)"
+    data_format: "AMQP Message (Job Payload)"
+    schema: "セッション終了後のデータ紐付け処理を依頼するジョブ。Queue: `data_linker_queue`"
+  - target: "BIDS Exporter Service (as a proxy)"
+    data_format: "Internal HTTP Call"
+    schema: "BIDSエクスポートリクエストをそのまま転送する。"
 ---
 
 ## 概要
 
-`Session Manager`は、実験の「設計」から「実施」、「記録」までのライフサイクル全体を管理する司令塔です。ユーザーはまず実験を作成し、その実験で使用する全ての刺激アセット（イベントリストCSVと画像ファイル群）を本サービスに登録します（実験の「計画」）。 この実験の参加者は、登録されたイベントリストCSVと画像ファイル群をもとに erp 検出タスクを行うことになります。セッション終了時には、どの刺激がいつ提示されたかという実行結果（「実績」）を受け取り、DBを更新すると共に、後続のデータ紐付けジョブを起動します。何らかの操作を行う前には、必ず`Auth Manager`サービスに権限の有無を問い合わせます。
+`Session Manager`は、実験の「設計」から「実施」、「記録」までのライフサイクル全体を管理する司令塔となるサービスです。実験の作成、セッションの開始・終了の記録といった中心的な役割を担います。また、自身で重い処理は行わず、刺激アセットの登録やデータ紐付けといったタスクを、RabbitMQを介してそれぞれの専門サービスに**委譲（delegate）**するのが大きな特徴です。各操作は、リクエストヘッダーの`X-User-Id`に基づき、`Auth Manager`サービスと連携する`requireAuth`ミドルウェアによって保護されます。
 
 ## 詳細
 
-* **責務**:
-    * 「実験の定義と、それに紐づくアセット（刺激ファイル等）の管理」
-    * 「実行されたセッションのライフサイクル（開始・終了）の管理と、その結果の記録」
+-   **責務**:
+    -   「実験の定義と参加者の管理」
+    -   「セッションのライフサイクル（開始・終了）の管理と、イベント実績の記録」
+    -   「専門的な処理（刺激アセット永続化、データ紐付け）のジョブを適切な非同期ワーカーへ投入すること」
 
-- **API エンドポイント**:
- -`POST /api/v1/sessions/start`: セッション開始時に呼び出されるAPI。`sessions`テーブルにレコードを先行して作成し、システムが「実行中のセッション」を把握できるようにする。
-  - `POST /api/v1/experiments`: 新規実験を作成。
-  - `GET /api/v1/experiments`: 既存の実験リストを取得。
-  - `POST /api/v1/experiments/{experiment_id}/stimuli`: 実験の計画を登録するエンドポイント。刺激ファイルの永続化処理は後段のワーカサービスの非同期キューにファイル永続化ジョブを投入する実装が望ましい。
-    - **用途**: 実験設計時に使用。
-    - **Request Body (Multipart/form-data)**:
-      - `stimuli_definition_csv` (part): 刺激の定義ファイル。アプリでは UI で刺激の提示順を決定できるため、決定された刺激順をアプリ内でcsvファイルとして生成する。全実験参加者に強制したい刺激の提示順があればこれによって決定する。提示順決定時にランダムな提示順が選択された場合、このファイルは順番の意味を持たず、単なる提示ファイルリストとして DB に登録される。
-        - **CSV Schema (例)**: `trial_type,file_name,description(optional)`
-        - trial_type は、キャリブレーション時のみ target_or_nontarget を 1 or 0 で示す。
-      - `stimulus_files` (part, multiple): CSVの`file_name`列に記載された全ての画像・音声ファイル。
-    - **処理フロー**:
-      1. **トランザクション開始**し、整合性を保証。
-      2. **CSVパース**し、必要な刺激ファイル名と実験条件（`trial_type`）のリストを作成。
-      3. **アセット検証**: アップロードされた`stimulus_files`とCSV記載の`file_name`を照合し、**過不足がないか厳密にチェックする。**
-      4. **ファイル永続化**: 各刺激ファイルをMinIOへアップロード、`object_id`を取得。将来的には専用のサービス（新規実装の必要あり）に責務を分散できるとよい。
-      5. **DB登録**: CSVの各行について、`experiment_id`や取得した`object_id`を`experiment_stimuli`テーブルに`INSERT`する。
-      6. **トランザクション完了**。
+---
 
-  - `POST /api/v1/sessions/end`: セッションの「実績」を登録するエンドポイント。リクエストを受け付けると、該当の`session_id`に紐づく既存のイベントログ (`session_events`テーブルのレコード) を一度すべて削除してから、新しいログを登録する（**DELETE & INSERT**）。これにより、ユーザーは誤ったログを安全に修正・再アップロードできる。
-    - **用途**: 全てのセッションタイプ（All-in-One, Hybrid）の終了時に呼び出される。
-    - **Request Body (Multipart/form-data)**:
-      - `metadata` (part): セッション情報を含むJSON文字列。
-        - `clock_offset_info`はスマートフォンアプリとファームウェア間の時刻同期結果であり、後段の`DataLinker`サービスがセンサーデータのタイムスタンプをUTCへ正確に補正するために使用されます。
-      - `events_log_csv` (part, optional): イベント実績ログ。
-        - CSV Schema: 
-`trial_type,file_name,description,onset(optional),duration(optional)`
-        - PsychoPy のイベントリストの csv スキーマに忠実に合わせる。
-        - **備考**: PsychoPy等と連携する「Hybridモード」では必須。アプリ完結の「All-in-Oneモード」ではアプリが内部生成して送信。
-    - **処理**:
-      1. `metadata`で`sessions`テーブルを更新。
-      2. `events_log_csv`が存在すればパースし、各行を`session_events`テーブルに`INSERT`する。
-      3. データ紐付けジョブを`DataLinker`のために非同期タスクキューに投入する。
+## スキーマ変更に伴う影響
 
-**metadata Schema (例)**:
-```json
-{
-  "session_id": "...",
-  "user_id": "...",
-  "experiment_id": "...",
-  "device_id": "...",
-  "start_time": "...",
-  "end_time": "...",
-  "session_type": "...",
-  "clock_offset_info": {
-    "offset_ms_avg": -150.5,
-    "rtt_ms_avg": 45.2
-  }
-}
-```
+新しいデータスキーマでは、`Collector`が受信する各データペイロードに`session_id`が含まれるようになります。これはセッション管理のアーキテクチャに重要な変更をもたらします。
 
-* **今後の拡張**:
-    * **ライフサイクル管理**: 実験内容の `更新 (PUT)` や `削除 (DELETE)` を行うためのAPIエンドポイントの実装が将来的に必要となる。
+### 1. `session_id`の役割の変化
 
+- **旧:** `session_id`は主に`Session Manager`のデータベース内でセッションを識別するための内部的なIDでした。
+- **新:** `session_id`は、データストリーム自体に含まれる**分散コンテキストID**としての役割を担います。各データが「どのセッションに属するか」を自己記述するようになるため、後続のサービスは`Session Manager`に問い合わせることなく、データのコンテキストを理解できます。
 
+### 2. セッション開始フローの更新
 
+`POST /api/v1/sessions/start`エンドポイントの役割がより重要になります。
+
+1.  クライアント（スマホアプリ）がこのエンドポイントを呼び出します。
+2.  `Session Manager`は`sessions`テーブルに新しいレコードを作成し、一意の`session_id`を生成します。
+3.  **`Session Manager`は、生成した`session_id`をレスポンスボディに含めてクライアントに返却する必要があります。**
+4.  クライアントは、受け取った`session_id`を、以降`Collector`に送信する全てのセンサーデータパケットの`session_id`フィールドに設定します。
+
+### 3. 他サービスとの依存関係の低下
+
+この変更により、各サービスはより疎結合になります。
+
+- `Processor`サービスは、受信したAMQPメッセージのヘッダーから`session_id`を直接取得し、`raw_data_objects`テーブルに保存できます。
+- `Data Linker`や`BIDS Exporter`といった後続サービスも、処理対象のデータに紐づく`session_id`をデータベースやメッセージヘッダーから直接取得できるため、`Session Manager`への実行時クエリが不要になります。
+
+`Session Manager`は、セッションの**マスターデータ（いつ、誰が、どの実験のセッションを開始・終了したか）**を管理する唯一の権威であることに変わりはありませんが、そのIDの使い方がより分散的・効率的になります。
+
+---
+
+## APIエンドポイント
+
+### 実験管理 (`/api/v1/experiments`)
+
+-   `POST /`
+    -   **機能**: 新規実験を作成します。
+    -   **権限**: 全ての認証済みユーザー。
+    -   **詳細**: リクエスト元のユーザー（`X-User-Id`ヘッダー）を`owner`として`experiment_participants`テーブルに自動的に登録します。オプションでパスワードを設定可能です。
+
+-   `GET /`
+    -   **機能**: 自分が参加している実験の一覧を取得します。
+    -   **権限**: 全ての認証済みユーザー。
+
+-   `POST /:experiment_id/stimuli`
+    -   **機能**: 実験で使用する刺激アセット（定義CSVとファイル群）の登録を**依頼**します。
+    -   **権限**: `owner`のみ。
+    -   **処理フロー**: このエンドポイントはファイルの永続化を直接行いません。代わりに、アップロードされたCSVとファイル群を検証し、それらをペイロードとして`stimulus_asset_queue`にジョブを投入します。実際の処理は`Stimulus Asset Processor`サービスが非同期に実行します。
+
+-   `GET /:experiment_id/stimuli`
+    -   **機能**: 指定された実験に登録済みの刺激アセットの一覧を取得します。
+    -   **権限**: `participant`以上（`owner`も含む）。
+
+-   `POST /:experiment_id/export`
+    -   **機能**: `BIDS Exporter`サービスの非同期エクスポート開始APIへのプロキシとして機能します。
+    -   **権限**: `owner`のみ。
+
+### セッション管理 (`/api/v1/sessions`)
+
+-   `POST /start`
+    -   **機能**: セッションの開始を記録します（事前登録）。
+    -   **権限**: `participant`以上。
+    -   **詳細**: `sessions`テーブルに基本的な情報（`session_id`, `user_id`, `start_time`など）を持つレコードを作成します。これにより、システムは実行中のセッションを把握できます。
+
+-   `POST /end`
+    -   **機能**: セッションの終了と、その実績（イベントログ）を記録します。
+    -   **権限**: `participant`以上。
+    -   **処理フロー**:
+        1.  `multipart/form-data`でJSONメタデータとイベントログCSVを受け取ります。
+        2.  `sessions`テーブルの既存レコードを更新します（`end_time`, `clock_offset_info`など）。
+        3.  `events_log_csv`が存在する場合、対象セッションの既存イベントを**全て削除（DELETE）**し、CSVの内容を`session_events`テーブルに**再登録（INSERT）**します。これにより、ログの修正・再アップロードが安全に行えます。
+        4.  DB更新が完了後、`DataLinker`サービスのために`data_linker_queue`へデータ紐付けジョブを投入します。
+
+### 刺激アセットダウンロード (`/api/v1/stimuli`)
+
+-   `GET /calibration/download/:filename`
+    -   **機能**: グローバルなキャリブレーション用刺激ファイルをダウンロードします。
+    -   **権限**: 全ての認証済みユーザー。
+
+-   `GET /:experiment_id/download/:filename`
+    -   **機能**: 特定の実験に紐づく刺激ファイルをダウンロードします。
+    -   **権限**: `participant`以上。
+    -   **詳細**: 両エンドポイントとも、MinIOからファイルを直接クライアントにストリーミングします。

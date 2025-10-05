@@ -1,69 +1,60 @@
 ---
 service_name: "Stimulus Asset Processor Service"
-description: "実験刺激アセット（画像、音声ファイル）の永続化を非同期で実行するバックエンドワーカーサービス。"
+description: "Session Managerから依頼を受け、実験で使用する刺激アセット（画像、音声など）を永続化する非同期ワーカーサービス。"
 
 inputs:
-  - source: "Session Manager Service (via RabbitMQ: stimulus_asset_queue)"
-    data_format: "AMQP Message (JSON)"
-    schema: |
-      {
-        "experiment_id": "uuid-for-experiment",
-        "csvDefinition": [
-          { "trial_type": "target", "file_name": "image1.jpg", "description": "Target A" },
-          { "trial_type": "nontarget", "file_name": "image2.jpg", "description": "Distractor B" }
-        ],
-        "files": [
-          { 
-            "fileName": "image1.jpg", 
-            "mimeType": "image/jpeg",
-            "contentBase64": "..." 
-          },
-          { 
-            "fileName": "image2.jpg",
-            "mimeType": "image/jpeg",
-            "contentBase64": "..." 
-          }
-        ]
-      }
+  - source: "Session Manager Service (via RabbitMQ: stimulus_asset_queue)"
+    data_format: "AMQP Message (JSON Job Payload)"
+    schema: |
+      {
+        "experiment_id": "uuid-v4-string",
+        "csvDefinition": [
+          {
+            "file_name": "string",
+            "trial_type": "string",
+            "description": "string | null"
+          }
+        ],
+        "files": [
+          {
+            "fileName": "string",
+            "mimeType": "string",
+            "contentBase64": "string"
+          }
+        ]
+      }
 
 outputs:
-  - target: "MinIO"
-    data_format: "Binary Data"
-    schema: "JPEG, WAVなどのメディアファイル本体"
-  - target: "PostgreSQL"
-    data_format: "SQL INSERT/UPDATE"
-    schema: "`experiment_stimuli`テーブルへのレコード書き込み"
+  - target: "MinIO"
+    data_format: "Binary Data"
+    schema: "アップロードされたファイル本体。オブジェクトIDは `stimuli/{experiment_id}/{file_name}` の形式。"
+  - target: "PostgreSQL"
+    data_format: "SQL INSERT/UPDATE (UPSERT)"
+    schema: "`experiment_stimuli`テーブルへの刺激メタデータの書き込み。`ON CONFLICT (experiment_id, file_name)`句により、既存のレコードは更新される。"
 ---
 
 ## 概要
 
-`Stimulus Asset Processor`は、`Session Manager`から非同期ジョブキュー（RabbitMQ）経由でジョブを受け取り、バックグラウンドで実行されるワーカーサービスです。主な責務は、実験の「計画」フェーズでアップロードされた全ての刺激アセット（画像や音声ファイル）を永続的なストレージ（MinIO）に保存し、そのメタデータをデータベース（PostgreSQL）に登録することです。
+`Stimulus Asset Processor`は、`Session Manager`から刺激アセットの登録ジョブを受け取り、バックグラウンドで永続化処理を実行する、ヘッドレスな（APIエンドポイントを持たない）非同期ワーカーサービスです。主な責務は、アップロードされた各ファイルをオブジェクトストレージ（MinIO）に保存し、そのメタデータとCSVで定義された実験条件をデータベース（PostgreSQL）に記録することです。
 
 ## 詳細
 
-### 責務 (Responsibilities)
+-   **責務**: **「実験計画で定義された全ての刺激アセットを、アトミックな操作で永続化すること」**。
+-   **アーキテクチャ**: 本サービスはRabbitMQの`stimulus_asset_queue`を監視するコンシューマとしてのみ機能します。ヘルスチェック以外のHTTP APIは提供しません。
 
-- **「非同期ジョブとして受け取った刺激アセット群のファイル本体とメタデータを、アトミックな操作として永続化すること」**に限定されます。
+### 処理フロー (Asynchronous Worker)
 
-このサービスは、HTTPエンドポイントを持たず、メッセージキューのコンシューマとしてのみ動作します。
+処理はデータベースの単一トランザクション内で実行され、全てのファイルとメタデータ登録の原子性が保証されます。
 
-### 処理フロー (Processing Flow)
-
-1.  `stimulus_asset_queue`からメッセージを一つ取り出す（デキュー）。
-2.  メッセージボディのJSONをパースし、`experiment_id`、`csvDefinition`、`files`を取得する。
-3.  **データベーストランザクションを開始**する (`BEGIN;`)。これにより、全てのアセットが登録されるか、全く登録されないかのどちらかであることが保証される（原子性）。
-4.  ジョブペイロード内の`files`配列をループ処理する:
-    1.  各ファイルの`contentBase64`をデコードし、バイナリデータ（Buffer）に戻す。
-    2.  `experiment_id`と`fileName`から、MinIOに保存するためのオブジェクトIDを生成する（例: `stimuli/{experiment_id}/{fileName}`）。
-    3.  バイナリデータを**MinIOにアップロード**する。
-    4.  `csvDefinition`配列から、現在のファイルに対応する定義情報（`trial_type`や`description`）を見つけ出す。
-    5.  `experiment_id`、ファイル名、定義情報、そしてMinIOから得られた`object_id`を`experiment_stimuli`テーブルに`INSERT`する。既存のレコードがある場合は`UPDATE`する（`ON CONFLICT`句を利用）。
-5.  全てのファイルの処理が成功した場合、**トランザクションをコミット**する (`COMMIT;`)。
-6.  処理中に何らかのエラー（MinIOへのアップロード失敗、DB書き込み失敗など）が発生した場合、**トランザクションをロールバック**し (`ROLLBACK;`)、処理の失敗をログに記録する。メッセージは再試行のためにキューに戻すか、デッドレターキューに送る。
-7.  正常に処理が完了したら、メッセージキューにACK（確認応答）を返し、ジョブを完全に削除する。
-
-### 背景 (Background)
-
--   **APIの応答性向上**: `Session Manager`が重いファイルI/O処理を直接行うと、多数のファイルを同時にアップロードした場合にAPIの応答が著しく遅延します。本サービスに処理を委譲することで、`Session Manager`はリクエストを即座に受け付け (`202 Accepted`)、ユーザー体験を損なうことなくバックグラウンドで処理を進めることができます。
--   **信頼性と一貫性**: データベースのトランザクション機能を利用することで、実験定義の原子性を保証します。「10個の画像のうち5個だけ登録されてしまった」といった中途半端な状態を防ぎ、データの整合性を高く保ちます。
--   **スケーラビリティ**: 将来的にアセット登録がシステムのボトルネックになった場合、APIサーバーである`Session Manager`とは独立して、本ワーカーサービスのインスタンス数のみを増やすことで、処理能力を柔軟にスケールさせることが可能です。
+1.  **ジョブ受信**: `stimulus_asset_queue`からジョブメッセージを一つ取り出します。
+2.  **ペイロード解析**: メッセージボディをJSONとしてパースし、`zod`スキーマでバリデーションします。
+3.  **トランザクション開始**: PostgreSQLで`BEGIN`を実行します。
+4.  **ファイル毎のループ処理**: ジョブペイロード内の`files`配列に含まれる各ファイルに対して、以下の処理を繰り返します。
+    a.  **データデコード**: `contentBase64`文字列をデコードして、ファイルのバイナリデータを復元します。
+    b.  **オブジェクトID生成**: `stimuli/{experiment_id}/{file.fileName}`という命名規則に従い、MinIOのオブジェクトIDを決定します。
+    c.  **MinIOへアップロード**: 復元したバイナリデータを、生成したオブジェクトIDで`media_bucket`にアップロードします。
+    d.  **DBへUPSERT**: `experiment_stimuli`テーブルに対し、`INSERT ... ON CONFLICT DO UPDATE`（UPSERT）を実行します。
+        -   **キー**: `(experiment_id, file_name)`がコンフリクトの対象です。
+        -   **INSERT**: 新規ファイルの場合、`experiment_id`, `file_name`, `object_id`、およびCSV定義から取得した`trial_type`, `description`などを挿入します。
+        -   **UPDATE**: 既に同じ実験に同名のファイルが存在する場合、レコード全体を新しい情報（新しい`object_id`や`trial_type`など）で上書きします。これにより、刺激アセットの更新が容易になります。
+5.  **トランザクション完了**: 全てのファイル処理が成功した場合、`COMMIT`を実行して変更を確定します。ループの途中で何らかのエラーが発生した場合は、`ROLLBACK`を実行して全ての変更を取り消し、ジョブをリキューさせて再処理を試みます。
