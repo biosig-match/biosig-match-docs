@@ -1,4 +1,3 @@
-````markdown
 # サーバー受信データスキーマ仕様
 
 ## 1. 概要
@@ -82,5 +81,59 @@
 | **サンプルデータ** |                                          |                                             |
 | `signals`            | 8ch EEG + 1ch Trigger (`int16_t`)        | 4ch EEG (`int16_t`, 12bit値を格納)          |
 
+-----
+
+## 6\. バイナリデータ例 (ペイロードの先頭部分)
+
+#### 例 1: 自作脳波計の場合
+
+`Header (102 bytes) + Sample[0] (39 bytes) + ...`
+
 ```
+// Header Block
+03                   // version: 3
+09                   // num_channels: 9
+00 00 7A 43          // sampling_rate: 250.0 (float32 LE)
+1E 13 1F 34          // lsb_to_volts: 5.722e-7 (float32 LE)
+00 00                // reserved
+// electrode_config[0] ("CH1", EEG)
+43 48 31 00 00 00 00 00 00 00
+... (残り7ch分続く) ...
+// electrode_config[8] ("TRIG", TRIG)
+54 52 49 47 00 00 00 00 03 00
+
+// Sample Data Block [0]
+// signals[9] (18 bytes)
+XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX
+// accel[3] + gyro[3] (12 bytes)
+00 00 00 00 00 00 00 00 00 00 00 00
+// impedance[9] (9 bytes)
+FF FF FF FF FF FF FF FF FF
+...
 ```
+
+#### 例 2: Muse 2 (4ch) の場合
+
+`Header (52 bytes) + Sample[0] (24 bytes) + ...`
+
+```
+// Header Block
+03                   // version: 3
+04                   // num_channels: 4
+00 00 80 43          // sampling_rate: 256.0 (float32 LE)
+00 00 F0 33          // lsb_to_volts: 4.8828e-7 (float32 LE)
+00 00                // reserved
+// electrode_config[0] ("TP9", EEG)
+54 50 39 00 00 00 00 00 00 00
+... (残り3ch分続く) ...
+
+// Sample Data Block [0]
+// signals[4] (8 bytes)
+XX XX XX XX XX XX XX XX
+// accel[3] + gyro[3] (12 bytes)
+00 00 00 00 00 00 00 00 00 00 00 00
+// impedance[4] (4 bytes)
+FF FF FF FF
+...
+```
+
