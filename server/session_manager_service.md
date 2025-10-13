@@ -56,7 +56,7 @@ outputs:
 
 ## 概要
 
-`Session Manager Service` は Hono で実装された REST API で、実験定義・セッション記録・刺激資産管理を司ります。全ての書き込み系操作は `requireAuth` / `requireUser` ミドルウェア (`session_manager/src/app/middleware/auth.ts`) で `Auth Manager Service` に照会した上で処理されます。RabbitMQ を用いた非同期連携により、重い処理は `Stimulus Asset Processor` と `DataLinker` に委譲します。
+`Session Manager Service` は Hono で実装された REST API で、実験定義・セッション記録・刺激資産管理を司ります。全ての書き込み系操作は `requireAuth` / `requireUser` ミドルウェア (`session_manager/src/app/middleware/auth.ts`) で `Auth Manager Service` に照会した上で処理されます。RabbitMQ を用いた非同期連携により、重い処理は `Stimulus Asset Processor` と `DataLinker` に委譲します。実験 ID を指定しない「フリーセッション」も許可され、外部刺激ツールやリアルタイム解析用途のデータ収集が可能です。
 
 ## ランタイム構成
 
@@ -141,9 +141,9 @@ outputs:
 
 | 項目 | 内容 |
 | --- | --- |
-| 権限 | participant 以上 |
-| ボディ | `sessionStartMetadataSchema` (`session_manager/src/app/routes/sessions.ts` 内部で定義)。`session_id`, `user_id`, `experiment_id`, `start_time`, `session_type`。 |
-| 処理 | `sessions` に `INSERT` (`ON CONFLICT DO NOTHING`)。 |
+| 権限 | participant 以上（`experiment_id` を指定する場合）、それ以外は認証済みユーザー |
+| ボディ | `sessionStartMetadataSchema` (`session_manager/src/app/routes/sessions.ts`) 。`session_id`, `user_id`, `start_time`, `session_type`, `experiment_id?`, `clock_offset_info?` |
+| 処理 | `sessions` に `INSERT` (`ON CONFLICT DO NOTHING`)。`experiment_id` が省略された場合はフリーセッションとして記録され、後段のジョブでもそのまま扱われる。 |
 
 ### `POST /api/v1/sessions/end`
 
@@ -151,13 +151,13 @@ outputs:
 | --- | --- |
 | 権限 | participant 以上 |
 | フォーム | `metadata` (JSON) + `events_log_csv` (任意)。 |
-| `metadata` スキーマ | `sessionEndMetadataSchema`: `session_id`, `user_id`, `experiment_id`, `device_id`, `start_time`, `end_time`, `session_type`。 |
+| `metadata` スキーマ | `sessionEndMetadataSchema`: `session_id`, `user_id`, `device_id`, `start_time`, `end_time`, `session_type`, `experiment_id?`, `clock_offset_info?`。 |
 | CSV 行スキーマ | `eventLogCsvRowSchema`: `onset`(必須数値), `duration?`, `trial_type`, `file_name?`, `description?`, `value?`。 |
 | 処理 |
   1.  トランザクション開始。
   2.  `sessions` の `end_time`, `device_id` を更新。
   3.  CSV があれば対象セッションの `session_events` を一括削除→再挿入。
-     - 刺激名と `experiment_stimuli.file_name` を照合し `stimulus_id` を設定。
+     - 刺激名と `experiment_stimuli.file_name` を照合し `stimulus_id` を設定（フリーセッションの場合はスキップ）。
      - キャリブレーションセッションの場合は `calibration_items` から `calibration_item_id` を解決。
   4.  コミット後に `DataLinker` へ `{ session_id }` を enqueue。
 | エラー処理 | CSV パースや Zod バリデーション失敗時は 400。ジョブ投入失敗時は 500 を返しつつログに警告。 |

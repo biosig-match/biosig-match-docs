@@ -9,6 +9,11 @@ inputs:
       POST /api/v1/neuro-marketing/experiments/:experiment_id/analyze
       Headers: X-User-Id (owner 必須)
       Body: なし
+  - source: "Web / 内部クライアント"
+    data_format: "HTTP GET"
+    schema: |
+      GET /api/v1/neuro-marketing/experiments/:experiment_id/analysis-results
+      Headers: X-User-Id (owner 必須)
   - source: "Auth Manager Service"
     data_format: "HTTP POST (JSON)"
     schema: |
@@ -35,6 +40,10 @@ outputs:
         experiment_id: uuid
         recommendations: [{ file_name, item_name?, brand_name?, description?, category?, gender? }]
         summary: string
+  - target: "PostgreSQL"
+    data_format: "SQL INSERT"
+    schema: |
+      INSERT INTO erp_analysis_results (experiment_id, requested_by_user_id, status, result_data, completed_at)
   - target: "ログ"
     data_format: "構造化ログ"
     schema: |
@@ -71,6 +80,7 @@ ERP Neuro-Marketing Service は FastAPI で提供される単一の公開エン�
 6. **推定**: `EmoSpecEstimator` が本番データに対して推定を実行し、反応が強かった刺激 (`prediction == 1`) を抽出。
 7. **推奨リスト組み立て**: `experiment_stimuli` メタデータと突合し、`recommendations` を作成。
 8. **要約生成**: `generate_ai_summary` が Gemini API (任意) で自然言語サマリーを作成。未設定の場合は定型文を返す。
+9. **結果保存**: 解析サマリーと推奨刺激を `erp_analysis_results` に永続化。以降の API から最新結果を取得できる。
 
 ## API 仕様
 
@@ -87,12 +97,25 @@ ERP Neuro-Marketing Service は FastAPI で提供される単一の公開エン�
   - 503: Auth/BIDS Exporter など外部サービス障害。
   - 500: 想定外エラー。 |
 
+### `GET /api/v1/neuro-marketing/experiments/{experiment_id}/analysis-results`
+
+| 項目 | 内容 |
+| --- | --- |
+| ヘッダー | `X-User-Id` (owner 権限を要求)。 |
+| 入力ボディ | なし。 |
+| 成功レスポンス | `AnalysisResultSnapshot` JSON（最新の解析結果を返却）。 |
+| 失敗レスポンス |
+  - 401: `X-User-Id` 欠如。
+  - 403: 権限不足。
+  - 404: 保存済みの解析結果が存在しない。 |
+
 ## 解析結果フォーマット
 
 | フィールド | 説明 |
 | --- | --- |
 | `recommendations` | 刺激ファイル単位の推奨リスト。`experiment_stimuli` の `file_name`, `item_name`, `brand_name`, `description`, `category`, `gender` が含まれる。 |
 | `summary` | Gemini API もしくはフォールバックメッセージによる解析要約文。 |
+| `generated_at` | （Snapshot のみ）解析完了日時。 |
 
 ## 参考ファイル
 

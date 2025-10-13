@@ -25,7 +25,7 @@ outputs:
       - UPDATE sessions SET link_status, event_correction_status
       - UPDATE raw_data_objects SET start_time, end_time, session_id
       - INSERT session_object_links(session_id, object_id)
-      - UPDATE images / audio_clips SET experiment_id
+      - UPDATE images / audio_clips SET experiment_id (セッションに experiment_id が存在する場合のみ)
   - target: "RabbitMQ queue event_correction_queue"
     data_format: "AMQP message (JSON)"
     schema: |
@@ -68,7 +68,7 @@ DataLinker は Bun で実装されたワーカー兼 HTTP API です。`Session 
    - 各オブジェクトの `timestamp_start_ms` / `timestamp_end_ms` を ISO8601 に変換し、`start_time` / `end_time` 列へ更新、`session_id` も設定。
    - `session_object_links` に `(session_id, object_id)` を UPSERT。
 5. `linkMediaToExperiment`:
-   - `images` / `audio_clips` で `session_id` が一致し `experiment_id` が NULL のレコードに対し、セッションの `experiment_id` を設定。
+   - セッションに `experiment_id` が設定されている場合のみ実行。`images` / `audio_clips` で `session_id` が一致し `experiment_id` が NULL のレコードに対し、セッションの `experiment_id` を設定。
 6. `link_status` を `completed` に更新。
 7. `event_correction_queue` へ `{ session_id }` を送信 (RabbitMQ チャンネルは `data_linker/src/infrastructure/queue.ts`)。
 8. コミット。失敗時は `ROLLBACK` の上 `link_status='failed'` に更新。
