@@ -1,169 +1,162 @@
 ---
 service_name: "PostgreSQL Database"
-description: "全てのメタデータを管理する、信頼性の高いリレーショナルデータベース。システムにおける唯一の信頼できる情報源 (Single Source of Truth) です。"
-
+component_type: "database"
+description: "実験・セッション・刺激・解析結果など構造化メタデータを保持する永続ストア。全サービスの一貫性を担保する。"
 inputs:
   - source: "Session Manager Service"
     data_format: "SQL INSERT/UPDATE/SELECT"
-    schema: "`experiments`, `sessions`, `experiment_stimuli`, `session_events`テーブル等の操作"
-  - source: "Media Processor Service"
-    data_format: "SQL INSERT"
-    schema: "`images`, `audio_clips`テーブルへのメタデータ書き込み"
+    schema: |
+      - experiments, experiment_participants
+      - sessions, session_events, experiment_stimuli, calibration_items
   - source: "Processor Service"
     data_format: "SQL INSERT"
-    schema: "`raw_data_objects`テーブルへのメタデータ書き込み"
+    schema: |
+      raw_data_objects(object_id, user_id, device_id, session_id?, start_time?, end_time?, timestamp_start_ms, timestamp_end_ms, sampling_rate, lsb_to_volts)
+  - source: "Media Processor Service"
+    data_format: "SQL INSERT"
+    schema: |
+      images(object_id, user_id, session_id, timestamp_utc)
+      audio_clips(object_id, user_id, session_id, start_time, end_time)
   - source: "DataLinker Service"
-    data_format: "SQL INSERT/UPDATE"
-    schema: "`session_object_links`テーブルへの書き込み, `raw_data_objects`, `sessions`テーブル等の更新"
+    data_format: "SQL UPDATE/INSERT"
+    schema: |
+      sessions.link_status, raw_data_objects.start_time/end_time/session_id,
+      session_object_links, images.experiment_id, audio_clips.experiment_id
   - source: "Event Corrector Service"
-    data_format: "SQL SELECT/UPDATE"
-    schema: "`session_events`と`sessions`テーブルの読み取りと更新"
-
+    data_format: "SQL UPDATE"
+    schema: |
+      session_events.onset_corrected_us,
+      sessions.event_correction_status
+  - source: "BIDS Exporter / ERP Neuro-Marketing"
+    data_format: "SQL SELECT/INSERT"
+    schema: |
+      - export_tasks
+      - erp_analysis_results (将来的な利用)
 outputs:
-  - target: "BIDS Exporter Service"
+  - target: "全アプリケーション"
     data_format: "SQL SELECT"
-    schema: "各種メタデータの読み出し"
-  - target: "Session Manager Service"
-    data_format: "SQL SELECT"
-    schema: "各種メタデータの読み取り"
-  - target: "DataLinker Service"
-    data_format: "SQL SELECT"
-    schema: "各種メタデータの読み取り"
-  - target: "Event Corrector Service"
-    data_format: "SQL SELECT"
-    schema: "各種メタデータの読み取り"
+    schema: |
+      各種読み取りクエリ (実験一覧、刺激メタデータ、解析対象など)
 ---
 
 ## 概要
 
-PostgreSQL は、本システムにおける全ての構造化されたメタデータを管理します。実験、セッション、刺激、イベント、ユーザー情報、そして MinIO に保存された個々のデータオブジェクトへの参照（ポインタ）といった、データ間の関係性と一貫性を保証する役割を担います。
+`db/init.sql` に定義されたスキーマは idempotent で、UUID 拡張 (`uuid-ossp`) を利用します。以下は主要テーブルの仕様とサービス間の依存関係です。
 
-## スキーマ詳細
+### experiments
 
-### `experiments` テーブル
+| 列 | 型 | 制約 |
+| --- | --- | --- |
+| `experiment_id` | UUID | PK, `uuid_generate_v4()` 既定 |
+| `name` | VARCHAR(255) | NOT NULL |
+| `description` | TEXT | 任意 |
+| `password_hash` | VARCHAR(255) | 任意 (Bcrypt/Bun hash) |
+| `presentation_order` | VARCHAR(50) | `sequential` or `random` |
 
-実験の基本情報を管理します。BIDSの概念に沿った、セッションや刺激をまとめる最上位のグループです。
+**利用サービス**: Session Manager (作成・参照), Auth Manager (参照), DataLinker (参照), BIDS Exporter / ERP (参照)。
 
-| カラム名 | 型 | 制約 / 説明 |
-|:---|:---|:---|
-| `experiment_id` | UUID | **PK**, サーバーが発行する一意な実験 ID |
-| `name` | VARCHAR(255) | NOT NULL, 実験名 |
-| `description` | TEXT | 実験の詳細 |
-| `password_hash` | VARCHAR(255) | 実験に参加するためのパスワードのハッシュ値 |
+### experiment_participants
 
-### `sessions` テーブル
+| 列 | 型 | 制約 |
+| --- | --- | --- |
+| `experiment_id` | UUID | PK, FK → experiments |
+| `user_id` | VARCHAR(255) | PK |
+| `role` | VARCHAR(50) | CHECK IN ('owner','participant') |
+| `joined_at` | TIMESTAMPTZ | DEFAULT NOW() |
 
-特定の実験のために行われた、具体的なデータ記録のインスタンス（セッション）を管理します。
+**利用サービス**: Auth Manager, Session Manager。
 
-| カラム名 | 型 | 制約 / 説明 |
-|:---|:---|:---|
-| `session_id` | VARCHAR(255) | **PK**, スマホアプリが生成 (`{user_id}-{creation_unix_ms}`) |
-| `user_id` | VARCHAR(255) | NOT NULL, ユーザー ID |
-| `experiment_id` | UUID | NOT NULL, _FK to experiments_, 属する実験の ID |
-| `device_id` | VARCHAR(255) | セッション終了時にアプリから送信されるデバイス ID |
-| `start_time` | TIMESTAMPTZ | NOT NULL, セッション開始時刻(UTC) |
-| `end_time` | TIMESTAMPTZ | セッション終了時刻(UTC), 終了時に更新される |
-| `session_type` | VARCHAR(50) | 'calibration', 'main_integrated', 'main_external' など |
-| `link_status` | VARCHAR(50) | NOT NULL, DEFAULT 'pending', `DataLinker`の状態 |
-| `clock_offset_info` | JSONB | アプリとデバイス間のクロック同期情報 |
-| `event_correction_status` | VARCHAR(50) | NOT NULL, DEFAULT 'pending', `EventCorrector`の状態 |
+### sessions
 
-### `experiment_participants` テーブル
+| 列 | 型 | 制約 |
+| --- | --- | --- |
+| `session_id` | VARCHAR(255) | PK |
+| `user_id` | VARCHAR(255) | NOT NULL |
+| `experiment_id` | UUID | FK → experiments |
+| `device_id` | VARCHAR(255) | 任意 |
+| `start_time` | TIMESTAMPTZ | NOT NULL |
+| `end_time` | TIMESTAMPTZ | 任意 |
+| `session_type` | VARCHAR(50) | 任意 (calibration/main 等) |
+| `link_status` | VARCHAR(50) | DEFAULT 'pending' |
+| `event_correction_status` | VARCHAR(50) | DEFAULT 'pending' |
 
-実験への参加者とその役割（ロール）を管理する、権限モデルの核となるテーブルです。
+**利用サービス**: Session Manager (挿入/更新), DataLinker (status 更新), Event Corrector (status 更新), BIDS Exporter / ERP (対象フィルタ)。
 
-| カラム名 | 型 | 制約 / 説明 |
-|:---|:---|:---|
-| `experiment_id` | UUID | **PK**, _FK to experiments_ |
-| `user_id` | VARCHAR(255) | **PK**, ユーザーID |
-| `role` | VARCHAR(50) | NOT NULL, 'owner', 'participant' など |
-| `joined_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW(), 参加日時 |
+### calibration_items
 
-### `experiment_stimuli` テーブル
+グローバル刺激のリスト。`object_id` に MinIO キーを保持。
 
-実験の**「設計（Plan）」**を管理します。実験で使用される可能性のある全ての刺激アセット（画像等）を実験デザインの段階で定義します。
+### experiment_stimuli
 
-| カラム名 | 型 | 制約 / 説明 |
-|:---|:---|:---|
-| `stimulus_id` | BIGSERIAL | **PK** |
-| `experiment_id` | UUID | NOT NULL, _FK to experiments_ |
-| `file_name` | VARCHAR(255) | NOT NULL, イベントログで参照されるファイル名 (例: 'image.jpg') |
-| `stimulus_type` | VARCHAR(50) | NOT NULL, 'image', 'audio'など |
-| `trial_type` | VARCHAR(255) | 実験条件を示すラベル (例: 'target', 'nontarget') |
-| `description` | TEXT | この個別の刺激に対する説明 |
-| `object_id` | VARCHAR(512) | MinIOに保存された刺激ファイル本体への参照キー |
-| UNIQUE (`experiment_id`, `file_name`) | | 実験内でファイル名は一意 |
+| 列 | 型 | 制約 |
+| --- | --- | --- |
+| `stimulus_id` | BIGSERIAL | PK |
+| `experiment_id` | UUID | FK → experiments |
+| `file_name` | VARCHAR(255) | NOT NULL, UNIQUE (experiment_id, file_name) |
+| `stimulus_type` | VARCHAR(50) | NOT NULL (`image`/`audio` 等) |
+| `category`, `gender`, `item_name`, `brand_name`, `trial_type`, `description` | 任意 |
+| `object_id` | VARCHAR(512) | MinIO キー |
 
-### `session_events` テーブル
+**利用サービス**: Session Manager (参照), Stimulus Asset Processor (UPSERT), ERP (参照), BIDS Exporter (参照)。
 
-セッションの**「実績（Log）」**を管理します。セッション中に実際に提示されたイベントのタイムスタンプ情報を記録します。
+### session_events
 
-| カラム名 | 型 | 制約 / 説明 |
-|:---|:---|:---|
-| `event_id` | BIGSERIAL | **PK**, このイベントログの一意なID |
-| `session_id` | VARCHAR(255) | NOT NULL, _FK to sessions_ |
-| `stimulus_id` | BIGINT | _FK to experiment_stimuli_, どの定義済み刺激が使われたか（NULL許容） |
-| `onset` | DOUBLE PRECISION | NOT NULL, セッション開始からのイベント発生時刻(秒) |
-| `duration` | DOUBLE PRECISION | NOT NULL, イベントの継続時間(秒) |
-| `trial_type`| VARCHAR(255) | このイベントインスタンスの実験条件 |
-| `description` | TEXT | このイベントインスタンス固有の説明 |
-| `value` | VARCHAR(255) | その他記録したい値 |
-| `onset_corrected_us` | BIGINT | `EventCorrector`によって補正された、デバイス内部クロック基準のイベント発生時刻（マイクロ秒） |
+| 列 | 型 | 制約 |
+| --- | --- | --- |
+| `event_id` | BIGSERIAL | PK |
+| `session_id` | VARCHAR(255) | FK → sessions |
+| `stimulus_id` | BIGINT | FK → experiment_stimuli (NULL 可) |
+| `calibration_item_id` | BIGINT | FK → calibration_items (NULL 可) |
+| `onset` | DOUBLE PRECISION | NOT NULL |
+| `duration` | DOUBLE PRECISION | NOT NULL |
+| `trial_type`, `description`, `value` | 任意 |
+| `onset_corrected_us` | BIGINT | NULL (Event Corrector が設定) |
 
-### `raw_data_objects` テーブル
+**利用サービス**: Session Manager (再挿入), Event Corrector (更新), BIDS Exporter / ERP (参照)。
 
-MinIO に保存された**圧縮済み**センサーデータ（EEG/IMU 混合）のメタデータを管理します。
+### raw_data_objects
 
-| カラム名 | 型 | 制約 / 説明 |
-|:---|:---|:---|
-| `object_id` | VARCHAR(512) | **PK**, MinIO のオブジェクトキー |
-| `user_id` | VARCHAR(255) | NOT NULL, ユーザー ID |
-| `device_id` | VARCHAR(255) | データパケットに含まれるデバイス ID |
-| `start_time` | TIMESTAMPTZ | データチャンクの開始UTC時刻 (`DataLinker`が設定) |
-| `end_time` | TIMESTAMPTZ | データチャンクの終了UTC時刻 (`DataLinker`が設定) |
-| `start_time_device` | BIGINT | デバイス内部クロックによる開始時刻（マイクロ秒） |
-| `end_time_device` | BIGINT | デバイス内部クロックによる終了時刻（マイクロ秒） |
+| 列 | 型 | 制約 |
+| --- | --- | --- |
+| `object_id` | VARCHAR(512) | PK |
+| `user_id` | VARCHAR(255) | NOT NULL |
+| `device_id` | VARCHAR(255) | NOT NULL |
+| `session_id` | VARCHAR(255) | FK → sessions (NULL 可) |
+| `start_time` / `end_time` | TIMESTAMPTZ | NULL (DataLinker が補完) |
+| `timestamp_start_ms` / `timestamp_end_ms` | BIGINT | NOT NULL |
+| `sampling_rate` | DOUBLE PRECISION | NOT NULL |
+| `lsb_to_volts` | DOUBLE PRECISION | NOT NULL |
 
-### `session_object_links` テーブル
+**利用サービス**: Processor (挿入), DataLinker (更新), Event Corrector / BIDS / ERP (参照)。
 
-`DataLinker`サービスによって、セッションとセンサーデータオブジェクトを紐付けるための中間テーブルです。
+### session_object_links
 
-| カラム名 | 型 | 制約 / 説明 |
-|:---|:---|:---|
-| `session_id` | VARCHAR(255) | **PK**, _FK to sessions_ |
-| `object_id` | VARCHAR(512) | **PK**, _FK to raw_data_objects_ |
+セッションと raw オブジェクトの多対多リンク。`DataLinker` が挿入。
 
-### `images` / `audio_clips` テーブル
+### images / audio_clips
 
-MinIO に保存されたメディアファイルのメタデータを管理します。
+| 列 | 型 | 制約 |
+| --- | --- | --- |
+| `object_id` | VARCHAR(512) | PK |
+| `user_id` | VARCHAR(255) | NOT NULL |
+| `session_id` | VARCHAR(255) | 任意 |
+| `experiment_id` | UUID | NULL → DataLinker が設定 |
+| `timestamp_utc` | TIMESTAMPTZ | 画像のみ |
+| `start_time`, `end_time` | TIMESTAMPTZ | 音声のみ |
 
-| カラム名 | 型 | 制約 / 説明 |
-|:---|:---|:---|
-| `object_id` | VARCHAR(512) | **PK**, MinIO のオブジェクトキー |
-| `user_id` | VARCHAR(255) | NOT NULL, ユーザー ID |
-| `session_id` | VARCHAR(255) | 非同期投入のため外部キー制約なし |
-| `experiment_id` | UUID | _FK to experiments_, `DataLinker`によって後から紐付け |
-| `timestamp_utc` | TIMESTAMPTZ | NOT NULL, **(images のみ)** 撮影時刻 |
-| `start_time` | TIMESTAMPTZ | NOT NULL, **(audio_clips のみ)** 録音開始時刻 |
-| `end_time` | TIMESTAMPTZ | NOT NULL, **(audio_clips のみ)** 録音終了時刻 |
+### export_tasks
 
-### `erp_analysis_results` テーブル**
-| カラム名 | 型 | 制約 / 説明 |
-|:---|:---|:---|
-| `analysis_id` | BIGSERIAL | **PK**, 解析ジョブの一意なID |
-| `experiment_id` | UUID | **FK to experiments**, NOT NULL |
-| `requested_by_user_id` | VARCHAR(255) | NOT NULL, 解析をリクエストしたユーザー |
-| `status` | VARCHAR(50) | 'processing', 'completed', 'failed' |
-| `result_data` | JSONB | 解析結果のJSONオブジェクト |
-| `created_at` | TIMESTAMPTZ | ジョブ作成日時 |
-| `completed_at` | TIMESTAMPTZ | ジョブ完了日時 |
+BIDS エクスポートタスク管理。`TaskStatus` API で利用。
 
-## 設計思想とデータ関連付け戦略
+### erp_analysis_results
 
-1.  **「計画」と「実績」の分離**:
-    本システムの核となる思想は、**実験の「計画」(`experiment_stimuli`)**と、**セッションの「実績」(`session_events`)**を明確に分離することです。
-    -   `experiment_stimuli`テーブルは、実験デザインフェーズで作成され、その実験で使われる全ての刺激アセットを定義します。これにより、データの完全性と再現性が保証されます。
-    -   `session_events`テーブルは、実際のセッション中に何がいつ起きたかというタイムスタンプ情報（ログ）を記録します。
-    -   この分離により、「All-in-Oneモード」と「Hybridモード（PsychoPy連携）」の両方のワークフローを単一のスキーマでエレガントに扱うことが可能になります。
+ERP 解析結果保存用。現行実装では未使用だが、将来的な永続化に備えて定義済み。
 
-2.  **メディアとセッションの非同期性**: `images`や`audio_clips`テーブルの`session_id`に外部キー制約を設けていない点は従来通りです。これにより、セッション中にキャプチャされる（刺激とは無関係な）メディアデータの非同期な投入を許容します。
+## インデックス
+
+`init.sql` ではクエリ頻度の高い列に複数のインデックス (`idx_sessions_experiment`, `idx_raw_data_objects_session_id` など) が追加されています。性能問題が顕在化した場合はここを起点に最適化します。
+
+## 参考
+
+- スキーマ: `db/init.sql`
+- 接続ユーティリティ: 各サービスの `infrastructure/db.ts` / `.py`

@@ -1,287 +1,288 @@
 import re
-import yaml
-from pathlib import Path
 import unicodedata
-import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 from graphviz import Digraph
 
-# --- 名称の揺れを吸収するためのマッピング ---
-NAME_TO_ID_MAP = {
-    "（データ紐付けワーカー）": "DataLinkageWorker",
-    "非同期タスクキュー (例: Celery)": "DataLinkageWorker",
-    "Async Task Queue (DataLinker)": "DataLinkageWorker",
-    "Firmware (ESP32)": "Firmware_BLE",
-    "ファームウェア (BLE)": "Firmware_BLE",
-    "スマートフォンアプリ": "SmartphoneApp",
-    "Smartphone App": "SmartphoneApp",
-    "Collectorサービス": "CollectorService",
-    "Collector Service": "CollectorService",
-    "Processorサービス": "ProcessorService",
-    "Processor Service": "ProcessorService",
-    "Realtime Analyzerサービス": "RealtimeAnalyzerService",
-    "Realtime Analyzer Service": "RealtimeAnalyzerService",
-    "Session Managerサービス": "SessionManagerService",
-    "Session Manager Service": "SessionManagerService",
-    "BIDS Exporterサービス": "BIDSExporterService",
-    "BIDS Exporter Service": "BIDSExporterService",
-    "MinIO (オブジェクトストレージ)": "MinIO",
-    "MinIO": "MinIO",
-    "PostgreSQL": "PostgreSQL",
-    "PostgreSQL Database": "PostgreSQL",
-    "ユーザー": "User",
-    "ユーザー (via API Call)": "User",
-    "RabbitMQ (Fanout Exchange: raw_data_exchange)": "RawDataExchange",
-    "RabbitMQ (processing_queue)": "ProcessingQueue",
-    "RabbitMQ (analysis_queue)": "AnalysisQueue",
-    "各種サーバーAPI": "APIServer",
-    "ERP検出システム": "APIServer",
+EXCLUDED_DIR_KEYWORDS = {"README", "_templates", "architecture"}
+
+COMPONENT_COLORS = {
+    "service": "#e8f0fe",
+    "queue": "#fff3cd",
+    "exchange": "#fdebd0",
+    "storage": "#e8f5e9",
+    "database": "#f8d7da",
+    "client": "#e3f2fd",
+    "hardware": "#ede7f6",
+    "other": "#ffffff",
 }
 
 
-def to_id(text, components_meta):
-    """
-    文字列をGraphvizの有効なノードIDに変換します。
-    """
-    if not isinstance(text, str):
-        return ""
-
-    original_text = text
-    normalized_text = unicodedata.normalize('NFKC', text).strip()
-
-    if normalized_text in NAME_TO_ID_MAP:
-        return NAME_TO_ID_MAP[normalized_text]
-
-    for component_id, meta in components_meta.items():
-        label_for_compare = meta.get("label", "").replace("\n", " ")
-        if normalized_text == label_for_compare or normalized_text == component_id:
-            return component_id
-
-    text_without_parens = re.sub(r'[\(（].*?[\)）]', '', normalized_text).strip()
-    if text_without_parens in NAME_TO_ID_MAP:
-        return NAME_TO_ID_MAP[text_without_parens]
-
-    print(f"Warning: Could not find a matching ID for '{original_text}'. It will be skipped.")
-    return ""
-
-
-def parse_markdown_frontmatter(file_path):
-    """
-    マークダウンファイルからYAMLフロントマターを解析します。
-    """
+def parse_markdown_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-    except IOError:
+        content = file_path.read_text(encoding="utf-8")
+    except OSError:
         return None
 
-    match = re.search(r'^---\s*\n(.*?)\n---', content, re.DOTALL)
+    match = re.search(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
     if not match:
         return None
 
     try:
-        return yaml.safe_load(match.group(1))
-    except yaml.YAMLError as e:
-        print(f"Error parsing YAML in {file_path}: {e}")
+        return yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError:
         return None
 
-def main():
+
+def slugify(name: str) -> str:
+    normalized = unicodedata.normalize("NFKD", name)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^0-9A-Za-z]+", "_", ascii_text).strip("_")
+    return cleaned or "node"
+
+
+def make_node_id(label: str, existing: Dict[str, str]) -> str:
+    key = label.lower().strip()
+    if key in existing:
+        return existing[key]
+
+    base = slugify(label)
+    candidate = base or "node"
+    suffix = 1
+    while candidate in existing.values():
+        suffix += 1
+        candidate = f"{base}_{suffix}"
+
+    existing[key] = candidate
+    return candidate
+
+
+def extract_entries(data: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+    value = data.get(key)
+    if not value:
+        return []
+    if isinstance(value, list):
+        entries: List[Dict[str, Any]] = []
+        for item in value:
+            if isinstance(item, dict):
+                entries.append(item)
+            elif isinstance(item, str):
+                entries.append({"text": item})
+        return entries
+    return []
+
+
+def build_label(data_format: Optional[str], schema: Optional[str]) -> str:
+    parts = []
+    if data_format:
+        parts.append(str(data_format).strip())
+    if schema:
+        parts.append(str(schema).strip())
+    return "\n".join(parts)
+
+
+def main() -> None:
     root_dir = Path(__file__).parent.parent
-    # NOTE: Assuming the script is in a 'scripts' directory or similar. 
-    # Adjust if your structure is different.
-    if not root_dir.exists() or not any(root_dir.iterdir()):
-        root_dir = Path.cwd() # Fallback to current working directory
-        
     architecture_dir = root_dir / "architecture"
     architecture_dir.mkdir(exist_ok=True)
-    
+
     output_md_file = architecture_dir / "02_data-flow.md"
     output_filename = "data-flow-diagram"
 
-    COMPONENTS_META = {
-        'User': {"label": "User", "description": "System User"},
-        'Firmware_BLE': {"label": "Firmware (BLE)", "description": "Data acquisition firmware"},
-        'SmartphoneApp': {"label": "Smartphone App", "description": "Mobile client and data relay"},
-        'CollectorService': {"label": "Collector Service", "description": "API gateway for raw data ingestion"},
-        'RawDataExchange': {"label": "RabbitMQ Exchange\n(raw_data_exchange)", "description": "Fanout exchange for data distribution"},
-        'ProcessingQueue': {"label": "Processing Queue", "description": "Queue for data persistence tasks"},
-        'AnalysisQueue': {"label": "Analysis Queue", "description": "Queue for real-time analysis tasks"},
-        'ProcessorService': {"label": "Processor Service", "description": "Processes and persists raw data"},
-        'RealtimeAnalyzerService': {"label": "Realtime Analyzer", "description": "Performs real-time analysis"},
-        'APIServer': {"label": "External API", "description": "Third-party or external APIs (e.g., ERP Detection System)"},
-        'MinIO': {"label": "MinIO\n(Object Storage)", "description": "Scalable storage for raw data objects"},
-        'PostgreSQL': {"label": "PostgreSQL\n(Metadata DB)", "description": "Relational database for all metadata"},
-        'SessionManagerService': {"label": "Session Manager", "description": "Manages experiment and session lifecycles"},
-        'BIDSExporterService': {"label": "BIDS Exporter", "description": "Exports data in BIDS format"},
-        'DataLinkageWorker': {"label": "Async Task Queue\n(DataLinker)", "description": "Asynchronous worker for data linkage"}
-    }
+    name_to_id: Dict[str, str] = {}
+    nodes: Dict[str, Dict[str, Any]] = {}
+    edges: List[Tuple[str, str, Dict[str, str]]] = []
 
-    SUBGRAPH_STRUCTURE = {
-        "External Actors": ['User', 'Firmware_BLE'],
-        "External Services": ['APIServer'],
-        "Mobile Client": ['SmartphoneApp'],
-        "API & Data Ingestion": ['CollectorService', 'RawDataExchange', 'ProcessingQueue', 'AnalysisQueue'],
-        "Backend Processing": ['ProcessorService', 'RealtimeAnalyzerService'],
-        "Storage Layer": ['MinIO', 'PostgreSQL'],
-        "Management & Export": ['SessionManagerService', 'BIDSExporterService', 'DataLinkageWorker']
-    }
+    docs = sorted(root_dir.rglob("*.md"))
 
-    connections = {}
-    discovered_ids = set()
-    node_descriptions = {}
-
-    for md_file in root_dir.rglob("*.md"):
-        if any(part in str(md_file) for part in ["README", "_templates", "architecture"]):
+    for md_file in docs:
+        if any(part in md_file.parts for part in EXCLUDED_DIR_KEYWORDS):
             continue
 
         data = parse_markdown_frontmatter(md_file)
         if not data:
             continue
 
-        if 'exchange_fanout' in data:
-            fanout_data = data['exchange_fanout']
-            exchange_name = fanout_data.get('name')
-            exchange_id = to_id(exchange_name, COMPONENTS_META)
-            if exchange_id:
-                discovered_ids.add(exchange_id)
-                node_descriptions[exchange_id] = fanout_data.get('description', COMPONENTS_META.get(exchange_id, {}).get('description'))
-                outputs_list = fanout_data.get('outputs', [])
-                if outputs_list:
-                    for item in outputs_list:
-                        target_id = to_id(item, COMPONENTS_META)
-                        if target_id:
-                            discovered_ids.add(target_id)
-                            conn_key = (exchange_id, target_id)
-                            connections[conn_key] = {
-                                "label": "AMQP Message",
-                                "tooltip": "Fanout distribution"
-                            }
+        service_name = data.get("service_name")
+        component_type = str(data.get("component_type", "other") or "other").lower()
+        description = data.get("description")
+
+        this_node_id: Optional[str] = None
+        if service_name:
+            this_node_id = make_node_id(service_name, name_to_id)
+            nodes.setdefault(
+                this_node_id,
+                {
+                    "label": service_name,
+                    "component_type": component_type,
+                    "description": description or "",
+                },
+            )
+        elif data.get("exchange_fanout"):
+            # 後方互換: 古い形式の front matter を許容
+            exchange = data["exchange_fanout"]
+            name = exchange.get("name")
+            if name:
+                component_type = "exchange"
+                this_node_id = make_node_id(name, name_to_id)
+                nodes.setdefault(
+                    this_node_id,
+                    {
+                        "label": name,
+                        "component_type": component_type,
+                        "description": exchange.get("description", ""),
+                    },
+                )
+            outputs = exchange.get("outputs", [])
+            for target in outputs:
+                target_name = str(target)
+                target_id = make_node_id(target_name, name_to_id)
+                nodes.setdefault(
+                    target_id,
+                    {
+                        "label": target_name,
+                        "component_type": "other",
+                        "description": "",
+                    },
+                )
+                edges.append(
+                    (
+                        this_node_id,
+                        target_id,
+                        {
+                            "label": "AMQP Message",
+                            "tooltip": target_name,
+                        },
+                    )
+                )
             continue
 
-        if 'service_name' not in data:
-            continue
+        inputs = extract_entries(data, "inputs")
+        outputs = extract_entries(data, "outputs")
 
-        service_id = to_id(data['service_name'], COMPONENTS_META)
-        if service_id:
-            discovered_ids.add(service_id)
-            node_descriptions[service_id] = data.get('description', COMPONENTS_META.get(service_id, {}).get('description'))
+        for entry in inputs:
+            source_name = entry.get("source") or entry.get("name") or entry.get("text")
+            if not source_name:
+                continue
+            source_name = str(source_name)
+            source_id = make_node_id(source_name, name_to_id)
+            nodes.setdefault(
+                source_id,
+                {
+                    "label": source_name,
+                    "component_type": "other",
+                    "description": "",
+                },
+            )
+            if not this_node_id:
+                continue
+            label = build_label(entry.get("data_format"), entry.get("schema"))
+            tooltip = entry.get("schema") or entry.get("data_format") or source_name
+            edges.append(
+                (
+                    source_id,
+                    this_node_id,
+                    {
+                        "label": label,
+                        "tooltip": str(tooltip),
+                    },
+                )
+            )
 
-        inputs_list = data.get('inputs')
-        if inputs_list:
-            for item in inputs_list:
-                source_id = to_id(item.get('source'), COMPONENTS_META)
-                if source_id and service_id:
-                    discovered_ids.add(source_id)
-                    conn_key = (source_id, service_id)
+        for entry in outputs:
+            target_name = entry.get("target") or entry.get("name") or entry.get("text")
+            if not target_name:
+                continue
+            target_name = str(target_name)
+            target_id = make_node_id(target_name, name_to_id)
+            nodes.setdefault(
+                target_id,
+                {
+                    "label": target_name,
+                    "component_type": "other",
+                    "description": "",
+                },
+            )
+            if not this_node_id:
+                continue
+            label = build_label(entry.get("data_format"), entry.get("schema"))
+            tooltip = entry.get("schema") or entry.get("data_format") or target_name
+            edges.append(
+                (
+                    this_node_id,
+                    target_id,
+                    {
+                        "label": label,
+                        "tooltip": str(tooltip),
+                    },
+                )
+            )
 
-                    # --- MODIFICATION: Combine data_format and schema for the edge label ---
-                    label_parts = []
-                    data_format = item.get('data_format')
-                    schema = item.get('schema')
-                    if data_format:
-                        label_parts.append(data_format)
-                    if schema:
-                        label_parts.append(schema)
-                    
-                    connections[conn_key] = {
-                        "label": "\n".join(label_parts),
-                        "tooltip": f"Schema: {item.get('schema', 'N/A')}"
-                    }
-                    # --- END MODIFICATION ---
-
-        outputs_list = data.get('outputs')
-        if outputs_list:
-            for item in outputs_list:
-                target_id = to_id(item.get('target'), COMPONENTS_META)
-                if service_id and target_id:
-                    discovered_ids.add(target_id)
-                    conn_key = (service_id, target_id)
-                    if conn_key not in connections:
-                        # --- MODIFICATION: Combine data_format and schema for the edge label ---
-                        label_parts = []
-                        data_format = item.get('data_format')
-                        schema = item.get('schema')
-                        if data_format:
-                            label_parts.append(data_format)
-                        if schema:
-                            label_parts.append(schema)
-
-                        connections[conn_key] = {
-                            "label": "\n".join(label_parts),
-                            "tooltip": f"Schema: {item.get('schema', 'N/A')}"
-                        }
-                        # --- END MODIFICATION ---
-
-    # Graphvizオブジェクトの作成
-    dot = Digraph(comment='Data Flow Diagram')
-    
+    dot = Digraph(comment="Data Flow Diagram")
     dot.attr(
-        rankdir='LR', 
-        splines='ortho',
-        nodesep='1.5',
-        ranksep='3.5',
-        label='Interactive Data Flow Diagram', 
-        labelloc='t', 
-        fontsize='20',
-        overlap='scale',
-        sep='+25'
+        rankdir="LR",
+        splines="ortho",
+        nodesep="1.5",
+        ranksep="3.0",
+        label="Interactive Data Flow Diagram",
+        labelloc="t",
+        fontsize="20",
+        overlap="scale",
+        sep="+25",
     )
-    
-    dot.attr('node', shape='box', style='rounded,filled', fontname='Arial', fontsize='12', width='2.5', height='1.2', fixedsize='true')
-    dot.attr('edge', fontname='Arial', fontsize='10')
 
-    # サブグラフ(クラスター)とノードの定義
-    for i, (subgraph_name, members) in enumerate(SUBGRAPH_STRUCTURE.items()):
-        drawable_members = [m for m in members if m in discovered_ids]
-        if not drawable_members:
+    dot.attr(
+        "node",
+        shape="box",
+        style="rounded,filled",
+        fontname="Arial",
+        fontsize="12",
+    )
+    dot.attr("edge", fontname="Arial", fontsize="10")
+
+    for node_id, meta in nodes.items():
+        comp_type = meta.get("component_type", "other")
+        fillcolor = COMPONENT_COLORS.get(comp_type, COMPONENT_COLORS["other"])
+        tooltip = meta.get("description") or meta.get("label")
+        dot.node(node_id, label=meta.get("label", node_id), fillcolor=fillcolor, tooltip=tooltip)
+
+    seen_edges = set()
+    for source_id, target_id, details in edges:
+        if not source_id or not target_id:
             continue
+        key = (source_id, target_id, details.get("label"))
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        label = details.get("label")
+        tooltip = details.get("tooltip")
+        kwargs = {"tooltip": tooltip}
+        if label:
+            kwargs["xlabel"] = label
+        dot.edge(source_id, target_id, **kwargs)
 
-        with dot.subgraph(name=f'cluster_{i}') as c:
-            c.attr(label=subgraph_name, style='rounded,filled', color='#eeeeee', fontcolor='black', fontsize='16')
-
-            for member_id in drawable_members:
-                if member_id in COMPONENTS_META:
-                    meta = COMPONENTS_META[member_id]
-                    fillcolor = 'white'
-                    if 'Storage' in subgraph_name or 'DB' in meta['label']:
-                        fillcolor = '#f8d7da'
-                    elif 'Queue' in meta['label'] or 'Exchange' in meta['label']:
-                        fillcolor = '#fff3cd'
-                    elif 'External' in subgraph_name:
-                        fillcolor = '#e3f2fd'
-                    elif 'Mobile' in subgraph_name:
-                        fillcolor = '#e8f5e9'
-
-                    node_tooltip = node_descriptions.get(member_id, meta.get('description', 'No description available.'))
-                    c.node(member_id, label=meta['label'], fillcolor=fillcolor, tooltip=node_tooltip)
-
-    # 接続とツールチップの描画
-    for (source, target), details in connections.items():
-        dot.edge(source, target, xlabel=details.get('label'), tooltip=details.get('tooltip'), labelfontsize='9')
-
-    # SVGファイルの生成
     try:
         output_path = architecture_dir / output_filename
-        dot.render(output_path, format='svg', cleanup=True)
+        dot.render(output_path, format="svg", cleanup=True)
         print(f"Diagram successfully generated at {output_path}.svg")
-    except Exception as e:
-        print(f"Error generating diagram with Graphviz: {e}", file=sys.stderr)
-        print("Please ensure Graphviz is installed and in your system's PATH.", file=sys.stderr)
-        sys.exit(1)
+    except Exception as error:  # pragma: no cover - graphviz runtime errors
+        print(f"Error generating diagram with Graphviz: {error}")
+        print("Please ensure Graphviz is installed and accessible in PATH.")
+        return
 
-    # Markdownファイルの更新
     output_image_file_name = f"{output_filename}.svg"
     output_text = f"""# Data Flow Diagram
 (This file is auto-generated by a script. Do not edit manually.)
 
-**Note:** This is an interactive diagram. Hover over components and connection lines to see more details.
+**Note:** この図はインタラクティブです。ノードやエッジにマウスオーバーすると補足情報が表示されます。
 
 ![Data Flow Diagram](./{output_image_file_name})
 """
-    with open(output_md_file, 'w', encoding='utf-8') as f:
-        f.write(output_text)
-
+    output_md_file.write_text(output_text, encoding="utf-8")
     print(f"Markdown file successfully updated at {output_md_file}")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

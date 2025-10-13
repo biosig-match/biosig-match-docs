@@ -1,78 +1,113 @@
 ---
 service_name: "Auth Manager Service"
-description: "実験へのアクセス権（誰が、どの実験に、何をできるか）を一元管理する、セキュリティの要となるサービス。"
-
+component_type: "service"
+description: "実験への参加権限とロールを統合管理し、他サービスからの認可問い合わせに対して判定結果を返す。"
 inputs:
-  - source: "Internal Services (e.g., ERP Neuro-Marketing)"
+  - source: "Frontend / 内部HTTPクライアント"
     data_format: "HTTP POST (JSON)"
-    schema: "`POST /api/v1/auth/check` with body `{"user_id", "experiment_id", "required_role"}`"
-  - source: "Frontend Clients (e.g., Smartphone App)"
-    data_format: "HTTP POST/GET/PUT (JSON)"
-    schema: "`/api/v1/auth/experiments/...` エンドポイント群へのリクエスト"
-
+    schema: |
+      POST /api/v1/auth/experiments/:experiment_id/join
+      Body:
+        user_id: string
+        password?: string
+  - source: "Session Manager Service"
+    data_format: "HTTP POST (JSON)"
+    schema: |
+      POST /api/v1/auth/check
+      Body:
+        user_id: string
+        experiment_id: uuid
+        required_role: 'owner' | 'participant'
+  - source: "PostgreSQL"
+    data_format: "SQL SELECT"
+    schema: |
+      - experiments(password_hash)
+      - experiment_participants(role, joined_at)
 outputs:
   - target: "PostgreSQL"
-    data_format: "SQL INSERT/UPDATE/SELECT/DELETE"
-    schema: "`experiments` (read-only for password hash) and `experiment_participants` (read/write) tables"
-  - target: "Requesting Service/Client"
-    data_format: "HTTP Response (JSON)"
-    schema: "`{"authorized": boolean}` or data payload/error message"
+    data_format: "SQL INSERT/UPDATE"
+    schema: |
+      - INSERT experiment_participants(experiment_id, user_id, role)
+      - UPDATE experiment_participants SET role = $1 WHERE experiment_id = $2 AND user_id = $3
+  - target: "呼び出し元クライアント"
+    data_format: "HTTP JSON"
+    schema: |
+      成功レスポンス:
+        - 参加登録: {"message": "Successfully joined experiment"}
+        - 参加者一覧: [{"user_id","role","joined_at"}]
+        - 権限判定: {"authorized": boolean}
+      エラーレスポンス: {"error": string}
 ---
 
 ## 概要
 
-`Auth Manager`は、本システムにおける全ての**認可 (Authorization)** を司る専用サービスです。「実験」という閉じられたリソースへのアクセス制御に特化し、誰が実験のオーナーで、誰が参加者なのか、といった情報を`experiment_participants`テーブルで一元管理します。他のサービスは、権限が必要な操作を行う前に、必ず本サービスの内部APIに権限の有無を問い合わせる必要があります。
+`Auth Manager Service` は、`experiment_participants` テーブルを正としつつ、実験単位でのアクセス制御を提供します。参照系エンドポイントでのみロールを確認し、書き込み系エンドポイントでは `Bun.password` によるパスワード検証とオーナー判定を実行します。コードは Hono 製 HTTP サーバーで、エントリポイントは `auth_manager/src/app/server.ts`、ルーティングは `auth_manager/src/app/routes/auth.ts` にまとまっています。
 
-## 詳細
+## ランタイム構成
 
--   **責務**: **「ユーザーと実験の関連付け、およびロール（役割）に基づいたアクセス権の判定」**。
--   **ロール**: `owner`と`participant`の2種類が存在します。
--   **認証 (Authentication)**: 本サービスは**認可**に特化しており、ユーザー自体の認証（ログインなど）は行いません。リクエスト元が誰であるかは、HTTPヘッダーなどを通じて信頼された情報として渡されることを前提とします。
+| 変数 | 既定値 | 用途 |
+| --- | --- | --- |
+| `PORT` | `3000` | Bun の待受ポート。 |
+| `DATABASE_URL` | 必須 | PostgreSQL 接続文字列。`dbPool` (`auth_manager/src/infrastructure/db.ts`) から利用。 |
 
-## APIエンドポイント
+## データベース利用
 
-全てのパスは `/api/v1/auth` をプレフィックスとします。
+| テーブル | 操作 | 使用箇所 |
+| --- | --- | --- |
+| `experiments` | `SELECT password_hash` | 参加処理時のパスワード照合 (`join` ハンドラ)。 |
+| `experiment_participants` | `INSERT`, `UPDATE`, `SELECT` | 参加登録、ロール変更、参加者一覧、`/check` 判定。 |
 
-### `POST /experiments/:experiment_id/join`
+`experiment_participants` では `(experiment_id, user_id)` を主キーとし、`role` が `owner` / `participant` のいずれかであることを前提としています。ロール更新は `UPDATE ... RETURNING` により更新結果を返却します。
 
-ユーザーが実験に参加するために使用します。
+## ヘルスチェック
 
--   **リクエストボディ**: `{"user_id": "string", "password": "string (optional)"}`
--   **処理フロー**:
-    1.  `experiments`テーブルを検索し、対象の実験にパスワード (`password_hash`) が設定されているか確認します。
-    2.  パスワードが設定されている場合、リクエストボディの`password`を`Bun.password.verify`で検証します。パスワードが不一致または未提供の場合は`401 Unauthorized`を返します。
-    3.  `experiment_participants`テーブルに、`user_id`と`experiment_id`を`'participant'`ロールで`INSERT`します。
-    4.  `ON CONFLICT`句により、ユーザーが既に存在する場合は何もせず、成功として扱います。
-    5.  成功した場合、`201 Created`を返します。
+- `GET /health` : DB に `SELECT 1` を実行し、接続可否のみを返します。失敗時は 503。
+- `GET /api/v1/health` : 上記に加え、`service` 名と `uptime`、`timestamp` を含む JSON を返します。
 
-### `GET /experiments/:experiment_id/participants`
+## API 詳細
 
-実験の参加者一覧を取得します。**オーナー権限が必要**です。
+### `POST /api/v1/auth/experiments/:experiment_id/join`
 
--   **ヘッダー**: `X-User-Id` (リクエスト元のユーザーID) が**必須**です。
--   **処理フロー**:
-    1.  `X-User-Id`ヘッダーのユーザーが、対象実験の`'owner'`であるかを確認します。
-    2.  オーナーでない場合は`403 Forbidden`を返します。
-    3.  オーナーである場合は、その実験の全参加者の`user_id`, `role`, `joined_at`のリストを返します。
+| 項目 | 内容 |
+| --- | --- |
+| 必須ヘッダー | なし |
+| ボディスキーマ | `auth_manager/src/app/schemas/auth.ts` の `joinExperimentSchema` を参照。 |
+| 主な検証 | `user_id` は必須文字列。実験にパスワードが設定されている場合、`password` が存在し `Bun.password.verify` に成功する必要があります。 |
+| 処理 | `experiment_participants` に `role='participant'` で `INSERT ... ON CONFLICT DO NOTHING`。 |
+| 成功レスポンス | `201 Created` + `{"message": "Successfully joined experiment"}`。 |
 
-### `PUT /experiments/:experiment_id/participants/:user_id`
+### `GET /api/v1/auth/experiments/:experiment_id/participants`
 
-実験参加者のロールを変更します。**オーナー権限が必要**です。
+| 項目 | 内容 |
+| --- | --- |
+| 必須ヘッダー | `X-User-Id` (呼び出しユーザー)。 |
+| 検証 | `isUserOwner` (`auth_manager/src/app/routes/auth.ts`) によりオーナー確認。失敗で 403。 |
+| レスポンス | 実験の全参加者 (`user_id`, `role`, `joined_at`) を配列で返却。 |
 
--   **ヘッダー**: `X-User-Id` (リクエスト元のユーザーID) が**必須**です。
--   **リクエストボディ**: `{"role": "owner" | "participant"}`
--   **処理フロー**:
-    1.  `X-User-Id`ヘッダーのユーザーが、対象実験の`'owner'`であることを確認します。
-    2.  オーナーでない場合は`403 Forbidden`を返します。
-    3.  オーナーである場合は、パスパラメータで指定された`:user_id`を持つ参加者の`role`を更新します。
-    4.  成功した場合、更新後の参加者情報を返します。
+### `PUT /api/v1/auth/experiments/:experiment_id/participants/:user_id`
 
-### `POST /check` (内部API)
+| 項目 | 内容 |
+| --- | --- |
+| 必須ヘッダー | `X-User-Id` (呼び出しユーザー)。 |
+| ボディ | `updateRoleSchema` (`auth_manager/src/app/schemas/auth.ts`) に準拠。`role` は `'owner'` か `'participant'`。 |
+| 処理 | オーナー判定後、対象ユーザーのロールを更新。存在しない場合は 404。 |
 
-他の内部サービスが権限を確認するための、最重要エンドポイントです。
+### `POST /api/v1/auth/check`
 
--   **リクエストボディ**: `{"user_id": "string", "experiment_id": "string", "required_role": "owner" | "participant"}`
--   **処理フロー**:
-    1.  リクエストボディの`user_id`が、`experiment_id`に対して要求されたロール (`required_role`) を満たしているか、`experiment_participants`テーブルを検索して確認します。
-    2.  **権限ロジックの階層性**: `required_role`が`'participant'`の場合、ユーザーの実際のロールが`'participant'`または`'owner'`であれば許可されます。`required_role`が`'owner'`の場合は、実際のロールが`'owner'`でなければ許可されません。
-    3.  結果を`{"authorized": true}`または`{"authorized": false}`の形式で返します。
+| 項目 | 内容 |
+| --- | --- |
+| ボディ | `authCheckSchema` (`user_id`, `experiment_id`, `required_role`)。 |
+| 判定ロジック | `required_role` が `owner` の場合は完全一致、`participant` の場合は `owner` も許可 (`authorizedRoles = ['owner','participant']`)。 |
+| レスポンス | `{ "authorized": boolean }`。DB エラー時は 500。 |
+
+## エラーハンドリング
+
+- Hono の `app.onError` で 500 を JSON `{ "error": "Internal Server Error" }` として統一。
+- DB 接続エラーはログ出力後 500。
+- 認証系の不備（ヘッダー欠如、パスワード不一致）は 4xx を返却します。
+
+## 参考ファイル
+
+- ルーティング: `auth_manager/src/app/routes/auth.ts`
+- スキーマ定義: `auth_manager/src/app/schemas/auth.ts`
+- DB 接続: `auth_manager/src/infrastructure/db.ts`

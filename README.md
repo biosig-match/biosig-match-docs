@@ -1,47 +1,63 @@
-# MyProject ドキュメントリポジトリ
+# biosig-match-docs
 
-このリポジトリは、MyProject に関連するすべての設計・仕様ドキュメントを一元管理します。
+本リポジトリは EEG プラットフォームの設計・仕様ドキュメントを「Docs as Code」方式で管理します。コードと同様に Pull Request / レビューの対象となるため、再現性のある情報と根拠を記載してください。
 
-## ✍️ ドキュメントの書き方
+## 📄 ドキュメント作成ルール
 
-このリポジトリのドキュメントは「Docs as Code」の考え方に基づき、一定のルールに従って記述されます。特に、各コンポーネント（サービス、ハードウェア、アプリなど）の`.md`ファイルは、データ連携を可視化するために**YAML Front Matter**と呼ばれるメタ情報を持つ必要があります。
+1. **YAML Front Matter を必須化** し、ドキュメント間で機械的に情報を取得できるようにします。先頭に以下のキーを記述してください。
 
-### YAML Front Matter の構造
+   ```yaml
+   ---
+   service_name: "Human readable 名称"
+   component_type: "service | queue | storage | database | client | hardware | other"
+   description: "1 行の要約"
+   inputs:
+     - source: "データの入力元"
+       data_format: "通信方式やファイル形式"
+       schema: |
+         実際のデータ構造を具体的に記述（Zod/Pydantic の定義パス、JSON 例、CSV 列など）
+   outputs:
+     - target: "出力先"
+       data_format: "出力形式"
+       schema: |
+         実装が扱う実データを明示
+   ---
+   ```
 
-新しい`.md`ファイルを作成する際は、`_templates/template.md`をコピーして使うか、ファイルの先頭に以下のブロックを記述してください。
+   - `component_type` はデータフロー図のノード分類に使用します。該当しない場合は `other`。
+   - `schema` には**曖昧な説明ではなく実装で使用している構造**（フィールド一覧、型、テーブル名など）を必ず記載してください。
+   - 参照するコードがある場合はファイルパス (例: `session_manager/src/app/routes/sessions.ts`) を併記するとレビューが容易です。
 
-```yaml
----
-service_name: "（ここにコンポーネントの正式名称を記述）"
-description: "（このコンポーネントが何をするのか、簡潔な説明）"
-inputs:
-  - source: "（入力元コンポーネント名 or ストレージ名）"
-    data_format: "（json, zst, wav など）"
-    schema: "（データ構造定義ファイルへのパス or 説明）"
-outputs:
-  - target: "（出力先コンポーネント名 or DBテーブル名）"
-    data_format: "（table row, parquet など）"
-    schema: "（データ構造定義ファイルへのパス or 説明）"
----
+2. ドキュメント本文では、
+   - 実装レベルの仕様（エンドポイントの入出力、キューのメッセージ形式、DB テーブルのカラム定義など）を記述する。
+   - 変更が発生した際に追随すべきコードのパスやテスト手順を残す。
+
+3. 既存ドキュメントを更新する場合は **「何が最新実装で、どこがコードと紐づいているか」** がひと目で分かるようにすること。
+
+## 🗺 データフロー図の更新
+
+`scripts/generate_flow.py` は Front Matter を解析して `architecture/02_data-flow.md` を自動更新します。
+
+```bash
+cd biosig-match-docs
+python scripts/generate_flow.py
 ```
 
-- **`service_name`**: このドキュメントが説明するコンポーネントの名称です。（例: `EEG Data Processor`, `Mobile App UI`）
-- **`description`**: コンポーネントの役割を一行で説明します。
-- **`inputs`**: このコンポーネントがどこからデータを受け取るかを記述します。複数ある場合は `-` で項目を増やします。
-- **`outputs`**: このコンポーネントがどこへデータを渡すかを記述します。
+- スクリプトは Front Matter からノード・エッジを抽出します。`schema` が空のエントリは線に反映されないため注意してください。
+- 図は `architecture/data-flow-diagram.svg` として出力され、`02_data-flow.md` に埋め込まれます。
 
-### ✨ データフロー図の自動生成
+## 📁 ディレクトリ構成
 
-上記のルールに従って各`.md`ファイルを記述すると、リポジトリに push した際に**GitHub Actions が自動で[データフロー図 (`architecture/02_data-flow.md`)](architecture/02_data-flow.md)を更新します。**
+- `architecture/` : アーキテクチャ全体図や設計思想。
+- `server/` : サーバーサイド各コンポーネントの仕様書。
+- `hardware/`, `firmware/`, `mobile/` : ハード・ファーム・モバイル領域のドキュメント。
+- `scripts/` : ドキュメント自動化スクリプト。
+- `_templates/` : 新規ドキュメント作成時のテンプレート。
 
-手動で図を編集する必要はありません。
+## ✅ レビュー時のポイント
 
-## 📂 ディレクトリ構成
+- Front Matter の `schema` が実装と一致しているか。
+- エンドポイント／メッセージの入出力が、該当コード (Zod/Pydantic/SQL) と矛盾しないか。
+- 依存関係や副作用 (DB 更新やキュー投入など) が明記されているか。
 
-- **`/architecture`**: システム全体のアーキテクチャ、設計思想、データフロー図。
-- **`/hardware`**: 筐体や電子回路に関する設計資料。
-- **`/firmware`**: マイコンのファームウェアに関する仕様書。
-- **`/mobile`**: Flutter 製モバイルアプリの仕様書。
-- **`/server`**: サーバーサイドの各サービス、データベースに関する仕様書。
-- **`/scripts`**: ドキュメント自動化のためのスクリプト。
-- **`/_templates`**: ドキュメントのテンプレート。
+この README 自体も仕様変更時に必ず更新してください。

@@ -1,144 +1,113 @@
 ---
 service_name: "BIDS Exporter Service"
-description: "指定された実験の完了済みセッションデータを収集し、BIDS形式のデータセットとしてパッケージングするサービス。公開用の非同期APIと、内部サービス用の同期APIの2系統を提供する。"
-
-# --- Public API (for external clients) ---
+component_type: "service"
+description: "完了済みセッションと刺激アセットを集約し、BIDS 形式データセットを生成して MinIO へ保存する FastAPI サービス。"
 inputs:
-  - source: "External Client (e.g., Web Dashboard)"
+  - source: "Session Manager Service / External dashboard"
     data_format: "HTTP POST"
-    schema: "`POST /api/v1/experiments/{experiment_id}/export` (body is empty)"
-  - source: "PostgreSQL"
-    data_format: "SQL SELECT"
-    schema: "実験、セッション、イベント、刺激定義のメタデータ。`sessions.event_correction_status = 'completed'` のセッションのみ対象。"
-  - source: "MinIO"
-    data_format: "Object GET"
-    schema: "セッションに対応する生データ（`raw_data_bucket`）と、実験刺激として登録されたメディアファイル（`media_bucket`）"
-
-outputs:
-  - target: "MinIO (`bids_bucket`)"
-    data_format: "ZIP Archive"
-    schema: "BIDS形式のディレクトリ構造を持つ圧縮済みデータセット。例: `eid_{experiment_id}.zip`"
-  - target: "PostgreSQL"
-    data_format: "SQL INSERT/UPDATE"
-    schema: "`export_tasks`テーブルにタスクの状態（pending, processing, completed, failed）、進捗、結果パスを記録する。"
-
-# --- Internal API (for erp_neuro_marketing_service) ---
-internal_inputs:
+    schema: |
+      POST /api/v1/experiments/{experiment_id}/export
+      Body: なし (header で X-User-Id を透過)
   - source: "ERP Neuro-Marketing Service"
     data_format: "HTTP POST (JSON)"
-    schema: "`POST /internal/v1/create-bids-for-analysis` with body `{"experiment_id": "..."}`"
-
-internal_outputs:
+    schema: |
+      POST /internal/v1/create-bids-for-analysis
+      Body: { experiment_id: uuid }
+  - source: "PostgreSQL"
+    data_format: "SQL SELECT"
+    schema: |
+      - experiments, sessions (status: event_correction_status='completed')
+      - session_events (onset_corrected_us 優先)
+      - experiment_stimuli (stimulus_metadata)
+      - raw_data_objects, images, audio_clips (MinIO オブジェクト参照)
+  - source: "MinIO"
+    data_format: "Object GET"
+    schema: |
+      - raw-data バケット: 生信号バイナリ (.bin)
+      - media バケット: 刺激ファイル
+outputs:
+  - target: "MinIO (bids exports bucket)"
+    data_format: "Object PUT (ZIP)"
+    schema: |
+      object_name: bids/{experiment_id}/task-{timestamp}.zip (configurable)
   - target: "Shared Volume"
-    data_format: "File System Write"
-    schema: "指定された`output_dir`にBIDS形式のディレクトリ構造を直接生成する（非圧縮）。"
-  - target: "ERP Neuro-Marketing Service"
-    data_format: "HTTP Response (JSON)"
-    schema: "`{"bids_path": "/path/to/bids_dataset"}` を同期的に返す。"
+    data_format: "ディレクトリ作成"
+    schema: |
+      output_dir = settings.export_output_dir / experiment_id
+      (内部 API 用、ZIP 化しない)
+  - target: "PostgreSQL"
+    data_format: "SQL INSERT/UPDATE"
+    schema: |
+      export_tasks(task_id, experiment_id, status, progress, result_file_path, error_message)
+  - target: "HTTP クライアント"
+    data_format: "JSON / ストリーム"
+    schema: |
+      - ExportResponse: {task_id,status,message,status_url}
+      - TaskStatus: {task_id, experiment_id, status, progress, result_file_path?, error_message?}
+      - ダウンロード: application/zip ストリーム
 ---
 
 ## 概要
 
-`BIDS Exporter`は、指定された実験のデータを収集し、標準化されたBIDS (Brain Imaging Data Structure) 形式のデータセットを生成するサービスです。本サービスは2つの異なるユースケースに対応するため、2系統のAPIを提供します。
+BIDS Exporter は FastAPI + BackgroundTasks で実装されています。公開 API は非同期タスクを管理し、内部 API は同期的に BIDS データセットを生成して共有ボリュームに展開します。主要実装ファイルは次の通りです。
 
-1.  **公開API (Asynchronous)**: 外部クライアント（Webダッシュボードなど）向けの非同期API。エクスポート処理をバックグラウンドで実行し、生成されたBIDSデータセットをZIPファイルとしてMinIOに保存します。クライアントはタスクIDを使って進捗をポーリングし、完了後に結果をダウンロードできます。
+- `bids_exporter/src/app/server.py`: FastAPI ルーティング。
+- `bids_exporter/src/domain/bids.py`: BIDS ディレクトリ生成ロジック。
+- `bids_exporter/src/domain/tasks.py`: `export_tasks` テーブル操作。
+- `bids_exporter/src/infrastructure/minio.py`: MinIO クライアント。
 
-2.  **内部API (Synchronous)**: `ERP Neuro-Marketing Service`のような内部サービス向けの同期API。BIDSデータセットをZIP化せず、共有ボリューム上に直接展開します。リクエスト元サービスが即座にデータへアクセスできるよう、処理が完了するまでHTTP接続をブロックし、完了後にデータセットへのファイルパスを返します。
+## ランタイム構成
 
-**注: 現在の実装には認証・認可機能は含まれていません。**
+| 変数 | 用途 |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL 接続。 |
+| `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_USE_SSL` | MinIO 接続設定。 |
+| `MINIO_RAW_DATA_BUCKET`, `MINIO_MEDIA_BUCKET`, `MINIO_BIDS_EXPORTS_BUCKET` | 読み書き先バケット。 |
+| `EXPORT_OUTPUT_DIR` | 内部 API 用のローカル出力先 (デフォルト `/export_data`)。 |
 
-## 公開API 詳細 (Public API)
+## 公開 API
 
-### APIエンドポイント
+### `POST /api/v1/experiments/{experiment_id}/export`
 
--   `POST /api/v1/experiments/{experiment_id}/export`
-    -   BIDSエクスポートのバックグラウンドタスクを開始します。
-    -   リクエストボディは不要です。
-    -   成功すると即座に `202 Accepted` を返し、タスク情報（`task_id`とステータス確認用URLを含む）を返します。
+| 項目 | 内容 |
+| --- | --- |
+| 入力 | URL パラメータ `experiment_id` (UUID)。ボディ無し。 |
+| 動作 | `uuid4()` で `task_id` を発行し、`export_tasks` にレコード挿入。`BackgroundTasks` で `create_bids_dataset(zip_output=True)` を実行。 |
+| レスポンス | `202 Accepted` + `ExportResponse`。`status_url` は `/api/v1/export-tasks/{task_id}`。 |
 
--   `GET /api/v1/export-tasks/{task_id}`
-    -   指定された`task_id`の現在のステータス（`pending`, `processing`, `completed`, `failed`）、進捗（%）、結果へのパスなどを返します。
+### `GET /api/v1/export-tasks/{task_id}`
 
--   `GET /api/v1/export-tasks/{task_id}/download`
-    -   タスクが`completed`状態の場合、MinIOから完成したZIPファイルをストリーミングでダウンロードさせます。
+`export_tasks` テーブルから状態を取得し、`TaskStatus` を返却。存在しない場合は 404。
 
-### 処理フロー (Asynchronous)
+### `GET /api/v1/export-tasks/{task_id}/download`
 
-1.  `POST /.../export`リクエストを受信すると、ユニークな`task_id`を生成し、`export_tasks`テーブルに`pending`状態でレコードを作成します。
-2.  FastAPIの`BackgroundTasks`を使い、`create_bids_dataset`関数を`zip_output=True`で非同期に実行します。
-3.  クライアントには即座に`task_id`を含む`202 Accepted`レスポンスを返します。
-4.  バックグラウンド処理が進行する中、`export_tasks`テーブルの進捗・ステータスが随時更新されます。
-5.  処理が完了すると、生成されたZIPファイルがMinIOの`bids_bucket`にアップロードされ、タスクのステータスが`completed`に、`result_file_path`がMinIOのオブジェクト名に更新されます。
-6.  クライアントは`GET /.../export-tasks/{task_id}`で進捗をポーリングし、`completed`になったことを確認して`GET /.../download`でファイルをダウンロードします。
+- `TaskStatus.status` が `completed` かつ `result_file_path` が設定されている必要がある。
+- MinIO から `StreamingResponse` で ZIP を返却。`Content-Disposition` ヘッダーでファイル名を通知。
 
-## 内部API 詳細 (Internal API)
+## 内部 API
 
-### APIエンドポイント
+### `POST /internal/v1/create-bids-for-analysis`
 
--   `POST /internal/v1/create-bids-for-analysis`
-    -   `erp_neuro_marketing`サービス専用の同期的（ブロッキング）なエンドポイント。
-    -   リクエストボディ: `{"experiment_id": "..."}`
-    -   処理が完了すると、`200 OK`と共に、共有ボリューム上のBIDSデータセットへの絶対パスを含むJSON (`{"bids_path": "..."}`) を返します。
+| 項目 | 内容 |
+| --- | --- |
+| 入力 | JSON: `{ experiment_id: UUID }`。 |
+| 処理 | `create_bids_dataset(zip_output=False)` を同期実行。出力先パスを含む `InternalBidsResponse` を返却。 |
+| エラー | 実験やセッション不足 → 404 (`ValueError` を 404 に変換)。その他は 500。 |
 
-### 処理フロー (Synchronous)
+## BIDS 生成ロジック (ハイライト)
 
-1.  `POST /internal/...`リクエストを受信すると、`create_bids_dataset`関数を`zip_output=False`で**同期的**に実行します。
-2.  関数はBIDSデータセットを共有ボリューム上の`output_dir`（設定で指定）に直接生成します。
-3.  処理が正常に完了すると、生成されたディレクトリへの絶対パスがHTTPレスポンスとして返されます。
-4.  エラーが発生した場合は、`404 Not Found`（データ不足など）や`500 Internal Server Error`が返されます。
+1. `sessions` から `event_correction_status='completed'` のセッションを取得。
+2. `raw_data_objects` を時間順に結合し、EDF 出力のために連結。
+3. `session_events.onset_corrected_us` を優先し、BIDS events.tsv の `onset` (秒) を計算。
+4. 刺激ファイルを `stimuli/` ディレクトリへコピー。
+5. ZIP 出力モードでは生成物を一時ディレクトリに展開後、MinIO の `MINIO_BIDS_EXPORTS_BUCKET` にアップロード、`export_tasks.result_file_path` を更新。
 
-## BIDS生成ロジック (`create_bids_dataset`)
+## ヘルスチェック
 
-両APIから呼び出されるコアロジックは以下の通りです。
+`GET /health` は MinIO 接続を試行し、失敗時は 503 を返却。
 
-1.  **データ収集**: DBから`event_correction_status = 'completed'`のセッションと、関連するイベント、刺激定義を取得します。
-    - **注:** このステップは、`Processor`サービスによる修正が適用済みの、新しい`raw_data_objects`テーブルスキーマを前提とします。具体的には、`session_id`で生データを検索し、`timestamp_start_ms`でソートする必要があります。
-2.  **基本ファイル生成**: `dataset_description.json`, `participants.tsv`を生成します。
-3.  **刺激ファイル配置**: `experiment_stimuli`で定義されたメディアファイルをMinIOの`media_bucket`からダウンロードし、BIDSディレクトリ内の`stimuli/`に配置します。
-4.  **セッション毎の処理**:
-    a.  セッションに紐づく生データオブジェクトをMinIOの`raw_data_bucket`から取得します。
-    b.  zstd圧縮または非圧縮のデータを伸長・読み込みします。
-    c.  固定オフセットを用いてバイナリデータをパースし、EEGデータを抽出・整形します。
-    d.  `mne-python`と`mne-bids`を使い、EEGデータをEDF形式で書き込みます (`..._eeg.edf`)。
-    e.  `onset_corrected_us`が設定されたイベントをDBから取得し、生データの開始時刻からの相対オフセットを計算して`..._events.tsv`を生成します。
-    f.  `..._eeg.json`（サイドカー）や`..._channels.tsv`に必要な情報を追記・修正します。
+## 参考ファイル
 
----
-
-## スキーマ変更に伴う修正要件 (`create_bids_dataset`ロジック)
-
-新しいデータスキーマに対応するため、BIDS生成の中核をなす`create_bids_dataset`関数は、**データパースとメタデータ抽出のロジックを全面的に書き換える必要があります。**
-
-### 1. バイナリパース処理の書き換え
-
-- **旧処理:** 固定オフセットを前提としたバイナリパース。
-- **新処理:** このロジックは**完全に廃止**し、新しいデータスキーマ仕様に従って書き換える必要があります。
-  - 各生データオブジェクトを`ヘッダーブロック`と`128個のサンプルデータブロック`の構造としてパースする必要があります。
-
-### 2. BIDSメタデータの動的生成
-
-BIDSファイル (`..._channels.tsv`, `..._eeg.json`) に必要なメタデータは、ハードコードではなく、バイナリのヘッダーブロックから動的に抽出しなければなりません。
-
-- **チャンネル情報 (`..._channels.tsv`):**
-  - `ヘッダーブロック`内の`num_channels`と`electrode_config`配列を読み取ります。
-  - `electrode_config`をループ処理し、各チャンネルの`name`と`type`を`..._channels.tsv`ファイルに書き出します。
-
-- **サンプリング周波数 (`..._eeg.json`):**
-  - `..._eeg.json`サイドカーファイルに必須の`SamplingFrequency`フィールドは、`raw_data_objects`テーブルに記録されている`timestamp_start_ms`と`timestamp_end_ms`から計算する必要があります。
-  - **計算式:** `SamplingFrequency = 128 / ((timestamp_end_ms - timestamp_start_ms) / 1000.0)`
-  - **注意:** 全てのデータブロックでサンプリング周波数が一定であると仮定しますが、念のため複数のブロックで検証することが望ましいです。
-
-### 3. EEGデータ抽出処理の書き換え
-
-- **旧処理:** 固定オフセットからのEEGデータ読み取り。
-- **新処理:** 以下の手順で、全チャンネルの連続した時系列データを再構築する必要があります。
-  1.  セッションに属する全ての生データオブジェクトを時系列順にソートします。
-  2.  各オブジェクトについて、128個の`サンプルデータブロック`を順番に処理します。
-  3.  各サンプルから`signals`配列（`uint16_t`の配列）を抽出します。
-  4.  これらの`signals`配列を連結し、チャンネルごとの連続したデータストリームをメモリ上で組み立てます。
-  5.  組み立てたデータを`mne-python`が要求するフォーマット（例: `(n_channels, n_samples)`のNumpy配列）に変換し、EDFファイルとして書き込みます。
-
-### 4. イベントファイル (`..._events.tsv`) のタイムスタンプ
-
-- `onset`カラム（イベントの開始時刻）は、BIDS仕様に従い、**そのセッションの最初のEEGサンプルのタイムスタンプを基準とした相対的な秒数**で表現する必要があります。
-- `Event Corrector`によって`onset_corrected_us`（マイクロ秒単位の絶対時刻）が計算済みであるため、セッションの最初の`raw_data_objects`の`timestamp_start_ms`を基準として、各イベントの相対的なオフセット（秒単位）を計算し、`onset`カラムに書き込んでください。
+- API スキーマ: `bids_exporter/src/app/schemas.py`
+- タスク管理: `bids_exporter/src/domain/tasks.py`
+- BIDS 処理: `bids_exporter/src/domain/bids.py`

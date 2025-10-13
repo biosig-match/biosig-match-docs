@@ -1,95 +1,95 @@
 ---
 service_name: "Realtime Analyzer Service"
-description: "生のセンサーデータをリアルタイムに解析し、脳波指標（PSD、Coherence）を算出してAPI経由で提供するサービス。"
-
+component_type: "service"
+description: "RabbitMQ からリアルタイムの生データを受信し、チャンネル品質評価と周波数解析を行いながら最新結果を API で提供する Flask アプリ。"
 inputs:
-  - source: "RabbitMQ (bound to raw_data_exchange)"
-    data_format: "AMQP Message"
+  - source: "RabbitMQ exchange raw_data_exchange"
+    data_format: "AMQP message"
     schema: |
-      Exchange: raw_data_exchange (fanout)
-      Body: Zstandard-compressed binary data
-      Headers: { "user_id": "string" }
-
+      Queue: analysis_queue (fanout)
+      Headers:
+        user_id: string
+        session_id?: string
+        sampling_rate: number
+        lsb_to_volts: number
+      Body: zstd 圧縮バイナリ (payload format v4)
+  - source: "Configuration"
+    data_format: "env"
+    schema: |
+      SAMPLE_RATE, ANALYSIS_WINDOW_SEC, ANALYSIS_INTERVAL_SECONDS など解析パラメータ
 outputs:
-  - target: "Frontend Client (e.g., Smartphone App)"
-    data_format: "HTTP GET (JSON)"
+  - target: "HTTP クライアント"
+    data_format: "JSON"
     schema: |
-      // GET /api/v1/users/{user_id}/analysis
-      {
-        "psd_image": "string (base64-encoded PNG)",
-        "coherence_image": "string (base64-encoded PNG)",
-        "timestamp": "ISO8601 string"
-      }
+      GET /api/v1/users/{user_id}/analysis ->
+        {
+          "spectral_psd_png_base64": string,
+          "connectivity_png_base64": string,
+          "channel_quality": {
+            channel_name: {
+              status: 'good'|'bad',
+              reasons: string[],
+              zero_ratio: number,
+              bad_impedance_ratio: number,
+              unknown_impedance_ratio: number,
+              flatline: boolean,
+              type: string,
+              has_warning: boolean
+            }
+          },
+          "generated_at": ISO8601
+        }
+      データ未準備時は 202 + {status: "..."}
+  - target: "監視クライアント"
+    data_format: "JSON"
+    schema: |
+      GET /health -> {status:'ok'|'unhealthy'}
 ---
 
 ## 概要
 
-`Realtime Analyzer`は、`Processor`サービスと並行して`raw_data_exchange`から生のセンサーデータを受け取る、リアルタイム解析に特化したサービスです。データはユーザーごとにメモリ上のリングバッファに蓄積され、バックグラウンドで定期的に解析が実行されます。解析結果（PSDとCoherenceのプロット画像）はメモリ内に保持され、クライアントはAPIを介して最新の解析結果をいつでも取得できます。
+Realtime Analyzer は Flask で提供される軽量 API で、バックグラウンドスレッド (`rabbitmq_consumer`, `analysis_worker`) が RabbitMQ と解析ループを担当します。`numpy`, `mne`, `mne-connectivity` を使用して PSD とコヒーレンスを計算し、結果を Base64 画像として保持します。
 
----
+## ランタイム構成
 
-## スキーマ変更に伴う修正要件
+| 変数 | 既定値 | 用途 |
+| --- | --- | --- |
+| `RABBITMQ_URL` | `amqp://guest:guest@rabbitmq:5672` | AMQP 接続。 |
+| `ANALYSIS_WINDOW_SEC` | `2.0` | 解析に使用する最新データ時間 (秒)。 |
+| `ANALYSIS_INTERVAL_SECONDS` | `10` | 解析ループの実行間隔。 |
+| `CHANNEL_*` | 複数 | チャンネル品質判定しきい値。 |
 
-新しいデータスキーマに対応するため、`Realtime Analyzer`のデータ受信・解析ロジックは、**特にデータパース部分を全面的に書き換える必要があります。**
+## メッセージ処理
 
-### 1. AMQPメッセージの入力仕様変更
+1. fanout exchange `raw_data_exchange` に対し `analysis_queue` を宣言・バインド。
+2. 受信バイナリを zstd 展開し、`parse_eeg_binary_payload_v4` でヘッダ (`ch_names`, `ch_types`) とサンプル配列 (`signals`, `impedance`) に分解。
+3. ユーザーごとのバッファ (`user_data_buffers`) とデバイスプロファイル (`user_device_profiles`) を更新。チャンネル品質は `ChannelQualityTracker` で追跡。
+4. バッファは 60 秒分を上限として保持し、古いデータを自動的にトリム。
 
-`Collector`から受け取るAMQPメッセージのヘッダーに、`session_id`, `device_id`, `timestamp_start_ms`, `timestamp_end_ms`が追加されます。特にタイムスタンプはサンプリング周波数の計算に必須です。
+## 解析ループ
 
-### 2. バイナリパースとEEGデータ抽出ロジックの書き換え
+- `analysis_worker` スレッドが `analysis_interval_seconds` ごとに実行。
+- `analysis_window_seconds` 相当の最新データを抽出し、`mne.io.RawArray` を生成。
+- 手順:
+  1. 悪いチャネルを除外。
+  2. `compute_psd` でパワースペクトル密度 (1–45Hz) を算出し、Matplotlib で画像化。
+  3. `spectral_connectivity_epochs` を用いてアルファ帯域 (8–13Hz) のコヒーレンスを計算し、`plot_connectivity_circle` で可視化。
+  4. `latest_analysis_results[user_id]` に画像とメタデータ (生成時刻、使用チャネル) を格納。
 
-- **旧処理:** 旧仕様のバイナリからEEGサンプルを抽出していました。
-- **新処理:** このロジックは**完全に廃止**し、新しいデータスキーマ仕様に従って書き換える必要があります。
-  1.  zstd伸長後、受信したバイナリを`ヘッダーブロック`と`128個のサンプルデータブロック`としてパースします。
-  2.  128個の各サンプルデータブロックから`signals`配列を抽出します。
-  3.  抽出した`signals`をメモリ上のリングバッファ（Numpy配列）に追加します。
+## API
 
-### 3. MNE-Python用メタデータの動的生成
+### `GET /api/v1/users/{user_id}/analysis`
 
-MNEライブラリで正しく解析を行うためには、`mne.Info`オブジェクトに正確なメタデータを渡す必要があります。これらの情報は、受信したデータから動的に生成しなければなりません。
+- ロック (`analysis_lock`) を取り最新解析結果を参照。
+- 結果が無ければ 202 + `{ "status": "ユーザー(...)の解析結果はまだありません..." }` を返却。
+- 結果があれば 200 で Base64 画像とチャネルレポートを返却。
 
-- **チャンネル情報:**
-  - `ヘッダーブロック`内の`num_channels`と`electrode_config`配列を読み取ります。
-  - `electrode_config`からチャンネル名のリストを生成し、`mne.Info`オブジェクトの作成時に渡します。
+### `GET /health`
 
-- **サンプリング周波数:**
-  - `mne.Info`オブジェクトに必須のサンプリング周波数（`sfreq`）は、AMQPメッセージヘッダーの`timestamp_start_ms`と`timestamp_end_ms`から計算する必要があります。
-  - **計算式:** `sfreq = 128 / ((timestamp_end_ms - timestamp_start_ms) / 1000.0)`
-  - **注意:** この計算はデータを受信するたびに毎回実行し、`mne.Info`オブジェクトを生成または更新する必要があります。サンプリング周波数がセッション中に変動する可能性も考慮に入れるべきです。
+- RabbitMQ 接続イベント (`rabbitmq_connected_event`) がセットされていれば 200、未接続なら 503。
 
-### 4. 解析の単位
+## 参考ファイル
 
-- 新しいヘッダーに含まれる`session_id`を利用して、セッションの切れ目で解析バッファをクリアする、といった改善が考えられます。
-
----
-
-## 詳細
-
--   **責務**: **「準リアルタイムでのデータ解析と、その結果の即時提供」**。データの永続化には一切関与しません。
--   **アーキテクチャ**: 本サービスはFlaskアプリケーションとして動作し、内部で2つのデーモンスレッド（RabbitMQコンシューマ、解析ワーカー）を並行して実行します。データと結果は全てメモリ上で管理され、スレッドセーフなアクセスが保証されています。
-
-### 処理フロー
-
-1.  **データ受信 (RabbitMQ Consumer Thread)**:
-    a.  起動時に`raw_data_exchange`に接続し、サービスインスタンスごとに一時的・排他的なキューをバインドします。これにより、`Collector`が発行する全ての生データパケットのコピーを受信します。
-    b.  メッセージを受信すると、zstdでペイロードを伸長し、バイナリデータからEEGサンプルを抽出します。
-    c.  メッセージヘッダーの`user_id`をキーとして、メモリ上の`user_data_buffers`辞書にある該当ユーザーのデータバッファ（Numpy配列）に新しいサンプルを追加します。
-    d.  メモリ枯渇を防ぐため、各ユーザーのバッファは最大60秒分のサンプル数に制限され、上限を超えると古いデータから破棄されます。
-
-2.  **定周期解析 (Analysis Worker Thread)**:
-    a.  設定された間隔（`analysis_interval_seconds`）で定期的に起動するループ処理を実行します。
-    b.  全てのユーザーバッファをチェックし、解析に必要なサンプル数（`analysis_window_seconds`分）が溜まっているものを対象とします。
-    c.  MNE-Pythonライブラリを用いて、バッファの末尾から取得した最新のデータチャンクに対して以下の解析を実行します。
-        -   **パワースペクトル密度 (PSD)**: `compute_psd`で計算し、結果をグラフ（`matplotlib.Figure`）としてプロットします。
-        -   **コヒーレンス (Coherence)**: 8-13Hz（α帯）の周波数帯における`spectral_connectivity_epochs`を計算し、結果をコネクティビティサークルとしてプロットします。
-    d.  生成された2つのグラフをPNG形式の画像に変換し、さらにBase64エンコードして文字列化します。
-    e.  `latest_analysis_results`辞書に、`user_id`をキーとして、2つの画像文字列と現在時刻のタイムスタンプを保存します。
-
-### APIエンドポイント
-
--   `GET /api/v1/users/<user_id>/analysis`
-    -   **目的**: 指定されたユーザーの最新の解析結果を取得します。
-    -   **処理**: メモリ上の`latest_analysis_results`辞書から`user_id`に対応するデータを検索します。
-    -   **レスポンス**:
-        -   結果が存在する場合: `200 OK`と共に、`psd_image`, `coherence_image`, `timestamp`を含むJSONオブジェクトを返します。
-        -   結果がまだ存在しない場合: `202 Accepted`と共に、解析がまだ利用できない旨のステータスメッセージを返します。
+- Flask サーバー: `realtime_analyzer/src/app/server.py`
+- 解析ロジック: `realtime_analyzer/src/domain` (現時点ではサーバーファイル内に集約)
+- 設定: `realtime_analyzer/src/config/env.py`

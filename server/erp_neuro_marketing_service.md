@@ -1,75 +1,101 @@
-### ERP Neuro-Marketing Service
-
-```markdown
+---
 service_name: "ERP Neuro-Marketing Service"
-description: "B2B向けニューロマーケティングアプリケーションのバックエンド。指定された実験の脳波データを解析し、ERP（事象関連電位）に基づいてユーザーが関心を示した可能性のある商品を推奨する。"
-
+component_type: "service"
+description: "BIDS Exporter と連携して ERP 解析を実行し、推奨刺激のリストと要約を返す FastAPI ベースの解析サービス。"
 inputs:
-  - source: "Smartphone App or Web Dashboard"
+  - source: "Web / 内部クライアント"
     data_format: "HTTP POST (JSON)"
     schema: |
-      - POST /api/v1/neuro-marketing/experiments/{experiment_id}/analyze
+      POST /api/v1/neuro-marketing/experiments/:experiment_id/analyze
+      Headers: X-User-Id (owner 必須)
+      Body: なし
   - source: "Auth Manager Service"
-    data_format: "HTTP GET (Internal API Call)"
-    schema: "解析開始リクエスト時に、ユーザーが実験の所有者であるかどうかの権限を確認する。"
-  - source: "BIDS Exporter Service"
-    data_format: "HTTP POST (Internal API Call)"
-    schema: "指定した実験のBIDSデータセット生成をリクエストし、生成先のパスを受け取る。"
-  - source: "PostgreSQL Database"
-    data_format: "SQL SELECT"
-    schema: "実験に関連するセッション情報や刺激（商品）情報を取得する。"
-  - source: "Shared Volume (e.g., MinIO)"
-    data_format: "File System Read"
-    schema: "BIDS Exporterによって生成されたBIDSデータセット（.eeg, .tsv, .jsonファイル群）を読み込む。"
-
-outputs:
-  - target: "Smartphone App or Web Dashboard"
-    data_format: "HTTP Response (JSON)"
+    data_format: "HTTP POST (JSON)"
     schema: |
-      {
-        "recommendations": [
-          {
-            "file_name": "string",
-            "item_name": "string (optional)",
-            "brand_name": "string (optional)",
-            "description": "string (optional)",
-            "category": "string (optional)",
-            "gender": "string (optional)"
-          }
-        ],
-        "summary": "string"
-      }
-  - target: "Shared Volume (e.g., MinIO)"
-    data_format: "File System Write"
-    schema: "学習済みのERP検出モデル（.pklなど）を実験IDに紐づけて保存する。"
-```
+      POST {AUTH_MANAGER_URL}/api/v1/auth/check
+      Body: { user_id: string, experiment_id: uuid, required_role: 'owner' }
+      用途: verify_owner_role 依存性での権限チェック
+  - source: "BIDS Exporter Service"
+    data_format: "HTTP POST (JSON)"
+    schema: |
+      POST {BIDS_EXPORTER_URL}/internal/v1/create-bids-for-analysis
+      Body: { experiment_id: uuid }
+      レスポンス: { bids_path: string }
+  - source: "PostgreSQL"
+    data_format: "SQL SELECT"
+    schema: |
+      - sessions (event_correction_status='completed')
+      - session_events
+      - experiment_stimuli (item_name, brand_name, category, gender)
+outputs:
+  - target: "HTTP クライアント"
+    data_format: "JSON"
+    schema: |
+      AnalysisResponse:
+        experiment_id: uuid
+        recommendations: [{ file_name, item_name?, brand_name?, description?, category?, gender? }]
+        summary: string
+  - target: "ログ"
+    data_format: "構造化ログ"
+    schema: |
+      INFO/ERROR ログを標準出力へ。解析手順・外部 API の失敗を記録。
+---
 
 ## 概要
 
-本サービスは、B2B向けニューロマーケティング解析の頭脳として機能します。ユーザー（実験管理者）からのリクエストを受け、指定された実験の脳波データからERP（事象関連電位）を解析します。具体的には、キャリブレーションデータを用いて個人に最適化されたERP検出モデルを学習し、そのモデルを使って本番タスクデータから関心を示した刺激（商品）を特定します。最終的に、推奨商品リストと解析サマリーを生成し、クライアントに返却します。
+ERP Neuro-Marketing Service は FastAPI で提供される単一の公開エンドポイントを持ち、ERP/感情スペクトラム解析を行います。`verify_owner_role` 依存性により `Auth Manager Service` へ権限を確認し、許可された場合は BIDS Exporter に内部 API 経由でデータセット生成を依頼、得られた BIDS データを用いて解析パイプラインを実行します。
 
-## 詳細
+主な実装ファイル:
 
-- **責務**: **「指定された脳波データ実験に対し、ERP解析を実行し、ビジネス上の意思決定に利用可能な推奨商品リストを生成・提供すること」**。
+- `erp_neuro_marketing/src/app/server.py` : FastAPI ルーティング。
+- `erp_neuro_marketing/src/app/dependencies/auth.py` : 権限チェック。
+- `erp_neuro_marketing/src/domain/analysis/orchestrator.py` : 解析パイプライン本体。
 
-- **API エンドポイント (API Endpoints)**:
+## ランタイム構成
 
-    - `POST /api/v1/neuro-marketing/experiments/{experiment_id}/analyze`:
-        - 指定された実験IDの解析ワークフロー全体を開始し、完了まで待機して結果を返す同期型のエンドポイント。
-        - **リクエストボディは不要。**
-        - 内部で権限検証、BIDSデータセットの準備、モデル学習、推論、結果生成までの一連の処理を実行する。
-        - 成功すると、HTTP `200 OK` と共に `AnalysisResponse` スキーマに準拠したJSONレスポンスを返す。
-        - 処理中にエラー（例: データ不足、外部サービス障害）が発生した場合は、適切なHTTPステータスコード（404, 500, 503など）と詳細メッセージを返す。
+| 変数 | 用途 |
+| --- | --- |
+| `DATABASE_URL` | 解析に必要なメタデータ取得。 |
+| `BIDS_EXPORTER_URL` | 内部 API 呼び出し先。 |
+| `AUTH_MANAGER_URL` | 権限チェック先。 |
+| `SHARED_VOLUME_PATH` | BIDS データ生成・モデル保存先。 |
+| `GEMINI_API_KEY` | 生成 AI 要約 (任意)。 |
 
-- **処理フロー (Processing Flow)**:
+## 解析フロー
 
-  1.  **解析リクエスト受付**: クライアント（アプリやダッシュボード）から `POST /api/v1/neuro-marketing/experiments/{experiment_id}/analyze` リクエストを受け付けます。
-  2.  **権限検証**: リクエストヘッダーの認証情報に基づき、`Auth Manager` サービスに問い合わせ、ユーザーが指定された `experiment_id` の所有者（`owner`）であることを確認します。権限がない場合は `403 Forbidden` を返します。
-  3.  **メタデータ取得**: PostgreSQLデータベースに接続し、指定された実験IDに紐づくセッション情報（キャリブレーション、本番タスク）および、刺激（商品）のメタデータを取得します。必要なセッションデータ（特に `event_correction_status = 'completed'` のもの）が存在しない場合は `404 Not Found` を返します。
-  4.  **BIDSデータセット生成依頼**: `BIDS Exporter` サービスに対し、内部APIコールでBIDSデータセットの生成を依頼します。`BIDS Exporter` は、データベースから波形データを取得し、標準化されたBIDS形式で共有ボリューム上に展開後、そのルートパスを返します。
-  5.  **Epochs生成**: BIDSデータセットのパスを元に、キャリブレーションデータと本番タスクデータの両方から、MNE-Pythonの`Epochs`オブジェクト（解析単位となる切り出された波形データ）を生成します。
-  6.  **ERPモデル学習**: キャリブレーションデータから生成した`Epochs`を用いて、`ErpDetector`モデル（分類器）を学習します。学習済みのモデルは、後で再利用できるよう共有ボリューム上の `models/{experiment_id}/` ディレクトリに保存されます。
-  7.  **推論実行**: 学習済みモデルを使い、本番タスクデータから生成した`Epochs`に対して推論を実行します。これにより、各刺激（商品）提示時に関心（ターゲット）を誘発したかどうかを判定します。
-  8.  **結果集計**: 推論結果に基づき、関心（ターゲット）と判定されたイベントに対応する刺激（商品）の情報を集計し、推奨商品リスト (`recommendations`) を作成します。
-  9.  **サマリー生成**: 解析結果の概要を示す簡単なサマリー文字列 (`summary`) を生成します。
-  10. **レスポンス返却**: 生成した推奨商品リストとサマリーを `AnalysisResponse` スキーマのJSON形式でクライアントに返却します。
+1. **認可**: `verify_owner_role` が `Auth Manager` の `/api/v1/auth/check` を呼び出し、`owner` ロールを確認。403/404 を透過して返却。
+2. **セッション・刺激メタデータ取得**: `_load_experiment_metadata` が PostgreSQL から完了済みセッションと刺激情報を取得。キャリブレーション/本番セッションが不足している場合は 404。
+3. **BIDS データ生成**: `request_bids_creation` が BIDS Exporter の内部 API を呼び出し、`bids_path` を受領。生成失敗時は 503。
+4. **前処理**: `create_epochs_from_bids` が calibration / main セッションごとの MNE Epochs を作成。
+5. **モデル学習**: `ErpDetector` がキャリブレーションデータから分類器を構築。
+6. **推定**: `EmoSpecEstimator` が本番データに対して推定を実行し、反応が強かった刺激 (`prediction == 1`) を抽出。
+7. **推奨リスト組み立て**: `experiment_stimuli` メタデータと突合し、`recommendations` を作成。
+8. **要約生成**: `generate_ai_summary` が Gemini API (任意) で自然言語サマリーを作成。未設定の場合は定型文を返す。
+
+## API 仕様
+
+### `POST /api/v1/neuro-marketing/experiments/{experiment_id}/analyze`
+
+| 項目 | 内容 |
+| --- | --- |
+| ヘッダー | `X-User-Id` (owner 権限を要求)。 |
+| 入力ボディ | なし。 |
+| 成功レスポンス | `AnalysisResponse` JSON。 |
+| 失敗レスポンス |
+  - 401: `X-User-Id` 欠如。
+  - 403 / 404: 権限 or 実験関連データ不足。
+  - 503: Auth/BIDS Exporter など外部サービス障害。
+  - 500: 想定外エラー。 |
+
+## 解析結果フォーマット
+
+| フィールド | 説明 |
+| --- | --- |
+| `recommendations` | 刺激ファイル単位の推奨リスト。`experiment_stimuli` の `file_name`, `item_name`, `brand_name`, `description`, `category`, `gender` が含まれる。 |
+| `summary` | Gemini API もしくはフォールバックメッセージによる解析要約文。 |
+
+## 参考ファイル
+
+- 依存解決: `erp_neuro_marketing/src/app/dependencies/auth.py`
+- 解析モデル: `erp_neuro_marketing/src/domain/analysis/models.py`
+- BIDS クライアント: `erp_neuro_marketing/src/infrastructure/bids_client.py`

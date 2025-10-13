@@ -1,58 +1,87 @@
 ---
 service_name: "Media Processor Service"
-description: "スマートフォンアプリから送信されたメディアファイル（画像、音声）を永続化する専用の非同期ワーカー。"
-
+component_type: "service"
+description: "Collector からキューイングされた画像・音声を MinIO へ保存し、メタデータを PostgreSQL に登録するコンシューマ。"
 inputs:
-  - source: "Collector Service (via RabbitMQ: media_processing_queue)"
-    data_format: "AMQP Message"
+  - source: "RabbitMQ queue media_processing_queue"
+    data_format: "AMQP message"
     schema: |
-      Body: Media file (binary)
-      Headers: {
-        "user_id": "string",
-        "session_id": "string",
-        "mimetype": "string",
-        "original_filename": "string",
-        "timestamp_utc": "ISO8601 string (for images)",
-        "start_time_utc": "ISO8601 string (for audio)",
-        "end_time_utc": "ISO8601 string (for audio)"
-      }
-
+      Headers:
+        user_id: string
+        session_id: string
+        mimetype: string
+        original_filename: string
+        timestamp_utc?: ISO8601 (image必須)
+        start_time_utc?: ISO8601 (audio必須)
+        end_time_utc?: ISO8601 (audio必須)
+      Body: バイナリファイル (画像 or 音声)
+  - source: "HTTP クライアント"
+    data_format: "HTTP POST (JSON)"
+    schema: |
+      POST /api/v1/preview-object-id
+      Body:
+        user_id: string
+        session_id: string
+        mimetype: string
+        original_filename: string
+        timestamp_utc?: string
+        start_time_utc?: string
+        end_time_utc?: string
 outputs:
-  - target: "MinIO"
-    data_format: "Binary Data with Metadata"
-    schema: "メディア種別に応じたパスにファイル本体を格納。MinIOオブジェクト自体にもContent-TypeやユーザーIDなどのメタデータが付与される。"
+  - target: "MinIO (media bucket)"
+    data_format: "Object PUT"
+    schema: |
+      Key: media/{user_id}/{session_id}/{timestampMs}_{photo|audio}{extension}
+      Metadata:
+        Content-Type, X-User-Id, X-Session-Id, X-Original-Filename
   - target: "PostgreSQL"
     data_format: "SQL INSERT"
-    schema: "`images`テーブルまたは`audio_clips`テーブルへのメタデータ書き込み。`ON CONFLICT (object_id) DO NOTHING`で重複を防止。"
+    schema: |
+      - 画像: INSERT INTO images(object_id,user_id,session_id,experiment_id?,timestamp_utc)
+      - 音声: INSERT INTO audio_clips(object_id,user_id,session_id,experiment_id?,start_time,end_time)
+      (ON CONFLICT (object_id) DO NOTHING)
+  - target: "監視クライアント"
+    data_format: "HTTP JSON"
+    schema: |
+      GET /api/v1/health -> { status, rabbitmq_connected, db_connected, minio_connected, last_rabbit_connected_at?, timestamp }
+      GET /health -> { status }
 ---
 
 ## 概要
 
-`Media Processor`は、メディアファイル（画像、音声など）の永続化処理に特化した非同期ワーカーサービスです。RabbitMQの`media_processing_queue`からファイル本体と豊富なメタデータを受け取り、`mimetype`に基づいて処理を分岐させ、データ本体をオブジェクトストレージ（MinIO）へ、メタデータを対応するデータベース（PostgreSQL）のテーブルへ記録します。
+Media Processor は Bun ベースの常駐コンシューマで、`media_processing_queue` から受信したメディアファイルを MinIO の `media` バケットに保存し、`images` / `audio_clips` テーブルへメタデータを登録します。HTTP インターフェイスはプレーンなオブジェクト ID のプレビュー計算とヘルスチェックのみを提供します。
 
-## 詳細
+## ランタイム構成
 
--   **責務**: **「メディアファイルを、その種類に応じた適切なメタデータと共に、永続的なストレージとデータベースに整理・保存すること」**。
+| 変数 | 用途 |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL 接続。 |
+| `RABBITMQ_URL` | AMQP 接続。 |
+| `MEDIA_PROCESSING_QUEUE` | コンシュームするキュー名。 |
+| `MEDIA_PREFETCH` | `channel.prefetch` で設定する同時処理数。 |
+| `MINIO_*` | MinIO 接続設定 (`MINIO_MEDIA_BUCKET` は既定 `media`)。 |
 
-### 処理フロー (Asynchronous Worker)
+## メッセージ処理 (`processMessage`)
 
-1.  **メッセージ受信**: `media_processing_queue`からメッセージを一つ取り出します。
-2.  **ヘッダー検証**: メッセージヘッダーを`zod`スキーマで厳格に検証します。`collector`サービスと同様に、`mimetype`が画像なら`timestamp_utc`、音声なら`start_time_utc`と`end_time_utc`が必須です。検証に失敗したメッセージは破棄されます（リキューされません）。
-3.  **オブジェクトID生成**: メタデータに基づき、MinIOに保存するための自己記述的なオブジェクトIDを以下の形式で生成します。
-    -   **形式**: `media/{user_id}/{session_id}/{timestamp_ms}_{media_type}.{ext}`
-    -   `timestamp_ms`: 画像の場合は`timestamp_utc`、音声の場合は`start_time_utc`がミリ秒に変換されて使用されます。
-    -   `media_type`: `mimetype`が`image/...`なら`photo`、それ以外は`audio`となります。
-4.  **MinIOへのアップロード**: メッセージボディのバイナリデータを、生成したオブジェクトIDでMinIOの`media_bucket`にアップロードします。その際、MinIOオブジェクトのメタデータとして`Content-Type`, `X-User-Id`, `X-Session-Id`なども保存します。
-5.  **データベースへの記録**: `mimetype`に応じて、対応するテーブルにメタデータを`INSERT`します。主キー（`object_id`）の重複コンフリクトが発生した場合は、`DO NOTHING`句によりエラーを出さずに処理をスキップします。
-    -   **画像 (`image/...`)**: `images`テーブルに`object_id`, `user_id`, `session_id`, `timestamp_utc`などを記録します。
-    -   **音声 (`audio/...`)**: `audio_clips`テーブルに`object_id`, `user_id`, `session_id`, `start_time`, `end_time`などを記録します。
-6.  **メッセージ確認**: 処理が成功するとメッセージを`ack`（確認応答）してキューから削除します。処理中にエラーが発生した場合は`nack`してリキューさせ、再処理を試みます。
+1. ヘッダーを `mediaMetadataSchema` で検証。画像は `timestamp_utc` 必須、音声は `start_time_utc` と `end_time_utc` 必須。
+2. オブジェクト ID を `media/{user_id}/{session_id}/{timestampMs}_{photo|audio}{ext}` の形式で生成。
+3. MinIO に `putObject` し、メタデータ (`X-User-Id` 等) を付加。
+4. `mimetype` が `image/*` の場合は `images` テーブルへ挿入、`audio/*` の場合は `audio_clips` へ挿入。両テーブルとも `session_id` を保持し、`experiment_id` は後続の `DataLinker` が設定します。
+5. 正常終了で ack。例外は `nack` + 再キュー。
 
-### APIエンドポイント
+## `/api/v1/preview-object-id`
 
-本サービスは主に非同期ワーカーとして動作しますが、デバッグやクライアント開発に便利なユーティリティAPIも提供しています。
+- 入力: RabbitMQ と同じメタデータ JSON。
+- 返却: `object_id` のみを返す (`{ "object_id": string }`)。
+- ファイル本体不要のため、アップロード前にクライアントが保存パスを把握する用途に利用可能。
 
--   `POST /api/v1/preview-object-id`
-    -   **目的**: 実際にファイルをアップロードすることなく、指定したメタデータから生成されるであろうMinIOの`object_id`を事前に確認できます。
-    -   **リクエストボディ**: `media_processing_queue`のAMQPヘッダーと同じ構造のJSONオブジェクト。
-    -   **レスポンス**: `{"object_id": "media/.../....jpg"}` のように、生成される`object_id`を返します。
+## ヘルスチェック
+
+- `GET /health`: RabbitMQ, DB, MinIO の接続を順に確認し、いずれかが失敗すると 503。
+- `GET /api/v1/health`: 各コンポーネントの状態を個別フラグで返却。
+
+## 参考ファイル
+
+- 実装: `media_processor/src/app/server.ts`
+- スキーマ: `media_processor/src/app/server.ts` 内 `mediaMetadataSchema`
+- 環境変数: `media_processor/src/config/env.ts`
