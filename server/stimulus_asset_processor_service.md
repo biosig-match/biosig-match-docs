@@ -46,6 +46,13 @@ outputs:
 
 Stimulus Asset Processor は Bun 製のコンシューマで、`session_manager` が投入するジョブを処理します。CSV とファイル内容は 1 メッセージに収められており、MinIO への保存と `experiment_stimuli` テーブルの更新を同一トランザクションで保証します (DB トランザクション + MinIO 書き込み)。実装は `stimulus_asset_processor/src/app/server.ts` および `stimulus_asset_processor/src/domain/services/processor.ts` に分割されています。
 
+## サービスの役割と主なユースケース
+
+- **刺激アセットの正規化**: モバイル/ウェブ UI からアップロードされた CSV と実ファイルを検証し、一貫したファイル名・MIME・trial_type を登録します。登録後は Session Manager や ERP サービスが同じ定義を参照できます。
+- **トランザクション整合性の担保**: ファイル保存と DB 更新をワンショットで行い、いずれかが失敗した場合はロールバック。中途半端な状態を残さず、再キューでやり直せるようにします。
+- **ストレージ命名規則の統一**: `stimuli/{experiment_id}/` 以下に格納することで、テナントごとにストレージを分けなくても衝突を避けられます。研究者はファイル名ベースで刺激を追跡できます。
+- **運用・検証用 API**: `/api/v1/jobs` から手動でジョブを投げ込めるため、CSV 修正後の再投入やステージング環境での検証に利用できます。
+
 ## ランタイム構成
 
 | 変数 | 用途 |

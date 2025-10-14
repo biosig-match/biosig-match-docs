@@ -1,42 +1,107 @@
-﻿---
+---
 service_name: "Firmware (ESP32)"
-description: "生体センサーデータの計測、タイムスタンプ付与、圧縮、およびBLE経由での送信を行う組み込みソフトウェア。"
+description: "ADS1299 ベースの EEG ボードを制御し、BLE (Nordic UART Service 互換) でデータをチャンク送信する組み込みファームウェア。"
 inputs:
-  - source: "物理センサー (ADC, MPU6050)"
-    data_format: "アナログ/デジタル信号"
-    schema: "N/A"
-  - source: "スマートフォンアプリ (BLE)"
-    data_format: "BLE Write (Ping for Time Sync)"
-    schema: "{ T1: uint64_t }"
+  - source: "ADS1299 (SPI)"
+    data_format: "SPI RDATAC ストリーム (24bit/CH)"
+    schema: "CH1-CH8, GPIO ステータス下位 4bit"
+  - source: "スマートフォンアプリ (BLE Write)"
+    data_format: "Control コマンド"
+    schema: "{ CMD_START_STREAMING(0xAA) | CMD_STOP_STREAMING(0x5B) }"
 outputs:
-  - target: "スマートフォンアプリ (BLE)"
-    data_format: "BLE Notify (Compressed Sensor Data)"
-    schema: "Zstandard圧縮されたバイナリデータ"
-  - target: "スマートフォンアプリ (BLE)"
-    data_format: "BLE Notify (Pong for Time Sync)"
-    schema: "{ T1: uint64_t, T2: uint64_t }"
+  - target: "スマートフォンアプリ (BLE Notify)"
+    data_format: "DeviceConfigPacket (0xDD)"
+    schema: "LE packed struct: { num_channels, ElectrodeConfig[8] }"
+  - target: "スマートフォンアプリ (BLE Notify)"
+    data_format: "ChunkedSamplePacket (0x66)"
+    schema: "25 サンプル分の SampleData を含む固定長 504 byte ペイロード"
 ---
 
 ## 概要
 
-本ファームウェアは、脳波(EEG)および慣性(IMU)センサーからデータを高速にサンプリングし、デバイス自身の内部クロックでマイクロ秒精度のタイムスタンプを各サンプルに付与します。一定量のデータがバッファに溜まると、Zstandard アルゴリズムで高効率に圧縮し、BLE 経由で接続先のスマートフォンアプリに送信します。
+このファームウェアは ESP32 上で動作し、ADS1299 のマルチチャンネル EEG データを 250 Hz で取得して BLE 経由でストリーミングします。NUS 互換のサービス UUID を採用し、スマートフォン側は `0xAA`/`0x5B` の単一バイトコマンドで計測開始・停止を制御します。計測開始時にはチャンネル構成を通知し、以降は 25 サンプル（0.1 秒）単位でチャンク化したサンプル列を通知します。
 
-また、スマートフォンアプリとの時刻同期のため、Ping-Pong メカニズムを実装します。
+## ハードウェアとピン割り当て
 
-## 詳細
+| 種別 | 役割 | ピン |
+| --- | --- | --- |
+| SPI CS | ADS1299 チップセレクト | `D1` (`PIN_SPI_CS`) |
+| DRDY | 新規サンプル準備完了割込み | `D0` (`PIN_DRDY`) |
+| SPI 設定 | `SPI_MODE1`, `MSBFIRST`, `1MHz` | `ads1299_spi_settings` |
 
-### データ収集と圧縮
+DRDY が Low になったタイミングでサンプルを読み出し、24bit の変換値を 16bit に縮退して保持します。未使用チャンネルは 0 でパディングします。
 
-- **責務**: 本ファームウェアの責務は、**「高品質なデータを、正確な相対時間情報と共に、可能な限り効率的に送信すること」**に限定されます。ユーザー ID、実験 ID、セッション ID といった概念は一切関知しません。
-- **背景**: 組み込み環境のリソースは限られています。責務を限定することで、データ収集のリアルタイム性を最優先し、ソフトウェアの堅牢性を高めます。セッションなどのメタ情報は、より強力なリソースを持つ上位のアプリケーション（スマホ、サーバー）が管理するべきです。
-- **データ構造**: パケットにはデバイスを一意に識別するための MAC アドレスから生成された`device_id`が含まれます。
-- **圧縮**: データは 0.5 秒分（`SAMPLE_RATE / 2`）など、一定サンプル数が溜まるごとに圧縮され、送信されます。これにより、リアルタイム性を損なうことなく、通信データ量を大幅に削減します。
+## 初期化シーケンス
 
-### 時刻同期 (Ping-Pong メカニズム)
+1. `Serial.begin(115200)` でデバッグログを有効化。
+2. BLE を `DEVICE_NAME = "ADS1299_EEG_NUS"` で初期化し、NUS 互換サービスを起動。
+3. SPI を初期化し、ADS1299 に対して以下を実行:
+   - `SDATAC` → `RESET` → `detectChannelCount()` によるチャネル数検出 (4/6/8)。
+   - `CONFIG1=0x96` (250 SPS), `CONFIG3=0xE0` (内部リファレンス)。
+   - 有効チャンネルに `0x60` (Gain ×24, 正常入力)、未使用チャンネルに `0x81` (電源断)。
+   - `START` → `RDATAC` で連続変換モードへ移行。
+4. 初期化完了後、BLE アドバタイジングを再開して接続待ち。
 
-- **目的**: BLE 通信の遅延の「ゆらぎ」を乗り越え、スマートフォンとファームウェアのクロックのズレ（オフセット）を正確に計測するため。
-- **処理フロー**:
-  1.  スマホから現在の UNIX 時間 `T1` を含む Ping メッセージを受信する。
-  2.  受信した瞬間に、自身の内部クロック時刻 `T2` を記録する。
-  3.  即座に、受信した `T1` と記録した `T2` をペアにした Pong メッセージをスマホに返信する。
-- **背景**: NTP のような標準的な時刻同期プロトコルが使えない BLE 環境において、アプリケーション層で実装できる最もシンプルかつ効果的な手法が往復時間(RTT)を利用したオフセット計算です。これにより、後段のサーバー側で全てのタイムスタンプを正確な UTC 時刻に補正することが可能になります。
+## BLE サービス構成
+
+| UUID | 用途 | プロパティ |
+| --- | --- | --- |
+| `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` | サービス UUID | - |
+| `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` | TX (通知) | Notify |
+| `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` | RX (制御) | Write |
+
+BLE サーバーコールバックで接続状態を監視し、切断時はストリーミング状態を自動でリセットします。`CMD_START_STREAMING` を受信するとバッファを初期化し、次回ループでデバイス設定パケットを通知します。`CMD_STOP_STREAMING` を受信するとフラグを落として計測を停止します。
+
+## ストリーミング処理
+
+- **サンプリング周期**: 250 Hz（ADS1299 側設定）。
+- **チャンクサイズ**: 25 サンプル（10 Hz 通知）。
+- **バッファ**: `SampleData sampleBuffer[25]` にリング状に蓄積。
+- **通知間隔**: `BLE_NOTIFY_INTERVAL_MS = 100` を満たす場合にのみ BLE 通知を送信し、スタックの処理時間確保のため 10 ms のディレイを入れます。
+- **トリガ状態**: `GPIO` 下位 4bit を `trigger_state` として保持し、将来の外部刺激同期に備えて `reserved[3]` を確保しています。
+
+ループ内では DRDY を監視してサンプル読み出し (`readOneAds1299Sample`) を行い、チャンクが埋まったタイミングで `ChunkedSamplePacket` を TX characteristic に設定して通知します。計測中でない場合は 10 ms スリープして BLE タスクに CPU を譲ります。
+
+## パケットフォーマット
+
+### DeviceConfigPacket (0xDD)
+
+| フィールド | 型 | 説明 |
+| --- | --- | --- |
+| `packet_type` | `uint8` | 固定値 `0xDD` |
+| `num_channels` | `uint8` | 検出した有効 EEG チャンネル数 (4/6/8) |
+| `reserved` | `uint8[6]` | 将来拡張用 (0 埋め) |
+| `configs[8]` | `ElectrodeConfig` | 8 エントリの固定配列 |
+
+`ElectrodeConfig` は `char name[8]` + `uint8 type` + `uint8 reserved`。現行実装では `CH1`〜`CH8`, `type=0`（EEG）で初期化されます。
+
+### ChunkedSamplePacket (0x66)
+
+| フィールド | 型 | 説明 |
+| --- | --- | --- |
+| `packet_type` | `uint8` | 固定値 `0x66` |
+| `start_index` | `uint16 LE` | チャンク先頭サンプルの通番 |
+| `num_samples` | `uint8` | 固定 25 |
+| `samples` | `SampleData[25]` | サンプル列 |
+
+`SampleData` は下記構造体 (LE):
+
+| フィールド | 型 | 説明 |
+| --- | --- | --- |
+| `signals[8]` | `int16` | 各チャネルの EEG 値 (左詰め、未使用は 0) |
+| `trigger_state` | `uint8` | ADS1299 GPIO 下位 4bit |
+| `reserved[3]` | `uint8` | 拡張用 (IMU 等) |
+
+パケット長は常に 504 byte で、スマートフォン側の受信ハンドラでスライス処理が容易になるよう固定されています。
+
+## エラーハンドリングとログ
+
+- `readOneAds1299Sample` は DRDY が High の場合 `false` を返し、ループ側で 1 ms スリープして busy loop を避けます。
+- BLE 通知/書き込みエラーは `Serial.println` でロギングされます（例: 停止コマンド受信時）。
+- 定期ハートビート (`loop_counter % 500000 == 0`) で接続状態とストリーミング状態をシリアルに出力し、スタックが停止していないかを確認できます。
+
+## 拡張ポイント
+
+- **IMU 連携**: `SampleData.reserved` を利用すれば IMU データを追加できる設計です。パケットサイズを維持する場合は 6 byte 程度まで追加可能です。
+- **チャネルラベル**: 現在は固定 `CH1`〜`CH8` ですが、将来的に BLE 経由でラベルを変更して `DeviceConfigPacket` に反映する余地があります。
+- **トリガ入力**: `trigger_state` は GPIO の生値を送出するのみです。閾値判定等を追加する場合は DRDY 読み出し後に処理を挟んでください。
